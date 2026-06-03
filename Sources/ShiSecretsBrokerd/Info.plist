@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDisplayName</key>
+    <string>Shikki Secrets Broker</string>
+    <key>CFBundleName</key>
+    <string>shikki-secrets-brokerd</string>
+    <key>CFBundleIdentifier</key>
+    <string>eu.fj-studios.shikki.secrets-brokerd</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>CFBundleShortVersionString</key>
+    <string>0.1.0</string>
+    <key>CFBundleExecutable</key>
+    <string>shikki-secrets-brokerd</string>
+    <key>CFBundlePackageType</key>
+    <string>TOOL</string>
+    <key>LSApplicationCategoryType</key>
+    <string>public.app-category.developer-tools</string>
+    <key>NSHumanReadableDescription</key>
+    <string>Sovereign secrets daemon for Shikki — vault-less local secret broker</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSSupportsAutomaticTermination</key>
+    <false/>
+    <key>NSSupportsSuddenTermination</key>
+    <false/>
+</dict>
+</plist>

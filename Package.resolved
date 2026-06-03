@@ -1,0 +1,33 @@
+{
+  "originHash" : "b2040459f094288570012ff1d87e73136986ef4fa225bfa11bca85b637edf7f6",
+  "pins" : [
+    {
+      "identity" : "shikki-plugin-api",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/FJ-Studios/shikki-plugin-api.git",
+      "state" : {
+        "revision" : "b0c6bf74bf83c2ca8ed404d1e93c023cdee3bf8d",
+        "version" : "0.1.4"
+      }
+    },
+    {
+      "identity" : "swift-asn1",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-asn1.git",
+      "state" : {
+        "revision" : "eb50cbd14606a9161cbc5d452f18797c90ef0bab",
+        "version" : "1.7.0"
+      }
+    },
+    {
+      "identity" : "swift-crypto",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/apple/swift-crypto.git",
+      "state" : {
+        "revision" : "95ba0316a9b733e92bb6b071255ff46263bbe7dc",
+        "version" : "3.15.1"
+      }
+    }
+  ],
+  "version" : 3
+}

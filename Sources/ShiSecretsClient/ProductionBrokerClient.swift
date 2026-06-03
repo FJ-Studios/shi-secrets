@@ -1,0 +1,153 @@
+import Foundation
+import ShiSecretsKit
+
+// ProductionBrokerClient — wire-protocol-bridged `BrokerClient` impl.
+//
+// Phase 0.2 (BR-G-03) of features/shikkisecrets-broker-completion.md.
+// Each protocol method builds a `WireRequest`, round-trips via
+// `SocketConnection`, parses the `WireResponse`, and returns the typed
+// result or throws `BrokerClientError`.
+//
+// JSON-RPC method namespace mapping (operator-stable; daemon side must
+// register these in its handler dispatch table):
+//
+//   secret.get                    → BrokerClient.get(name:)
+//   secret.list                   → BrokerClient.list(filter:)
+//   secret.set                    → BrokerClient.set(name:value:)
+//   secret.rotate                 → BrokerClient.rotate(name:)
+//   token.revoke                  → BrokerClient.revoke(jti:)
+//   token.revokeAllBots           → BrokerClient.revokeAllBots(dryRun:force:)
+//   token.revokeAllBotsSigned     → BrokerClient.revokeAllBotsSigned(_:)
+//   audit.blastRadius             → BrokerClient.blastRadius(jti:)
+//   audit.recent                  → BrokerClient.recentAudit(hours:)
+//   audit.seams                   → BrokerClient.seamsRows()
+//
+// Each request id is a freshly-minted UUID string (caller can mismatch
+// match-anti-pattern is irrelevant at single-frame transport).
+
+public actor ProductionBrokerClient: BrokerClient {
+
+    public let socket: SocketConnection
+
+    public init(socket: SocketConnection = SocketConnection()) {
+        self.socket = socket
+    }
+
+    // MARK: - secret.*
+
+    public func get(name: String) async throws -> String {
+        let params: JSONValue = .object(["name": .string(name)])
+        let result = try await call(method: "secret.get", params: params)
+        guard case let .string(value) = result else {
+            throw BrokerClientError.wireDecodeFailed("secret.get expected string, got \(result)")
+        }
+        return value
+    }
+
+    public func list(filter: String?) async throws -> [VaultEntryRef] {
+        var paramsDict: [String: JSONValue] = [:]
+        if let f = filter { paramsDict["filter"] = .string(f) }
+        let result = try await call(method: "secret.list", params: .object(paramsDict))
+        guard case let .array(items) = result else {
+            throw BrokerClientError.wireDecodeFailed("secret.list expected array")
+        }
+        let entries: [VaultEntryRef] = try items.map { item in
+            let data = try jsonValueToData(item)
+            return try JSONDecoder().decode(VaultEntryRef.self, from: data)
+        }
+        return entries
+    }
+
+    public func set(name: String, value: String) async throws {
+        let params: JSONValue = .object(["name": .string(name), "value": .string(value)])
+        _ = try await call(method: "secret.set", params: params)
+    }
+
+    public func rotate(name: String) async throws -> RotationResult {
+        let params: JSONValue = .object(["name": .string(name)])
+        let result = try await call(method: "secret.rotate", params: params)
+        return try decodeResult(result, as: RotationResult.self)
+    }
+
+    // MARK: - token.*
+
+    public func revoke(jti: String) async throws {
+        let params: JSONValue = .object(["jti": .string(jti)])
+        _ = try await call(method: "token.revoke", params: params)
+    }
+
+    public func revokeAllBots(dryRun: Bool, force: Bool) async throws -> RevokeAllBotsResult {
+        let params: JSONValue = .object(["dryRun": .bool(dryRun), "force": .bool(force)])
+        let result = try await call(method: "token.revokeAllBots", params: params)
+        return try decodeResult(result, as: RevokeAllBotsResult.self)
+    }
+
+    public func revokeAllBotsSigned(_ signed: SignedAdminAction) async throws -> RevokeAllBotsResult {
+        let signedJSON = try jsonValueFromEncodable(signed)
+        let params: JSONValue = .object(["signed": signedJSON])
+        let result = try await call(method: "token.revokeAllBotsSigned", params: params)
+        return try decodeResult(result, as: RevokeAllBotsResult.self)
+    }
+
+    // MARK: - audit.*
+
+    public func blastRadius(jti: String) async throws -> BlastRadiusReport {
+        let params: JSONValue = .object(["jti": .string(jti)])
+        let result = try await call(method: "audit.blastRadius", params: params)
+        return try decodeResult(result, as: BlastRadiusReport.self)
+    }
+
+    public func recentAudit(hours: Int) async throws -> [AuditRow] {
+        let params: JSONValue = .object(["hours": .int(Int64(hours))])
+        let result = try await call(method: "audit.recent", params: params)
+        guard case let .array(items) = result else {
+            throw BrokerClientError.wireDecodeFailed("audit.recent expected array")
+        }
+        return try items.map { try decodeResult($0, as: AuditRow.self) }
+    }
+
+    public func seamsRows() async throws -> [SeamsWriter.Row] {
+        let result = try await call(method: "audit.seams", params: .object([:]))
+        guard case let .array(items) = result else {
+            throw BrokerClientError.wireDecodeFailed("audit.seams expected array")
+        }
+        return try items.map { try decodeResult($0, as: SeamsWriter.Row.self) }
+    }
+
+    // MARK: - Internals
+
+    private func call(method: String, params: JSONValue) async throws -> JSONValue {
+        let id = UUID().uuidString
+        let req = WireRequest(method: method, params: params, id: id)
+        let resp = try await socket.roundTrip(req)
+        if let err = resp.error {
+            // Map deny code to denied-error variant for caller UX
+            if err.code == WireErrorCode.denied {
+                throw BrokerClientError.denied(reason: err.message)
+            }
+            throw BrokerClientError.brokerError(code: err.code, message: err.message)
+        }
+        guard let result = resp.result else {
+            throw BrokerClientError.wireDecodeFailed("response missing result")
+        }
+        return result
+    }
+
+    private func decodeResult<T: Decodable>(_ value: JSONValue, as type: T.Type) throws -> T {
+        let data = try jsonValueToData(value)
+        return try JSONDecoder().decode(type, from: data)
+    }
+
+    private func jsonValueToData(_ value: JSONValue) throws -> Data {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        return try encoder.encode(value)
+    }
+
+    private func jsonValueFromEncodable<T: Encodable>(_ value: T) throws -> JSONValue {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let data = try encoder.encode(value)
+        return try JSONDecoder().decode(JSONValue.self, from: data)
+    }
+}

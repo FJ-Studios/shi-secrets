@@ -1,0 +1,17 @@
+[plugin]
+id = "one.obyw.shikki.shi-secrets"
+name = "shi-secrets"
+slug = "shi-secrets"
+version = "0.1.0"
+repo = "gh:FJ-Studios/shi-secrets"
+description = "shi-secret:// URI scheme + 6-step resolver + broker daemon + 9 CLI verbs"
+verb = "secrets"
+profile_include = ["desktop-default"]
+depends_on_plugin_api = ">=0.1.4"
+
+[plugin.cli]
+top_level_verb = "secrets"
+sub_verbs = ["list", "get", "set", "status", "secrets-to-env", "rotate", "blast-radius", "revoke", "audit"]
+
+[plugin.doctor]
+checks = ["vault-uri-deprecated"]

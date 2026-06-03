@@ -1,0 +1,168 @@
+// kagami-scope: exempt — resolver-exempt marker only (no behavioral change); package has no .kagami/scopes.yaml coverage.
+import Crypto
+import Foundation
+import ShiSecretsKit
+
+// shikki-secrets-brokerd — Wave 5 standalone daemon entrypoint.
+//
+// Bootstrap → BrokerDaemon.start() → runAcceptLoop until SIGTERM.
+//
+// macOS LaunchAgent (or direct invocation) enters here. No ShikkiKernel
+// supervisor required — the daemon manages its own lifecycle.
+//
+// BR-I-04: bootstrap.unseal is the first runtime action. On failure the
+// process exits non-zero; no socket is bound.
+//
+// Signal handling: SIGTERM / SIGINT cancel the watchdog task, which calls
+// socket.shutdown() so accept() returns EBADF and runAcceptLoop exits.
+
+// MARK: - Shutdown coordinator (actor-isolated)
+
+private actor ShutdownCoordinator {
+    private var shutdownContinuation: CheckedContinuation<Void, Never>?
+    private var triggered = false
+
+    func waitForShutdown() async {
+        if triggered { return }
+        await withCheckedContinuation { cont in
+            shutdownContinuation = cont
+        }
+    }
+
+    func triggerShutdown() {
+        guard !triggered else { return }
+        triggered = true
+        shutdownContinuation?.resume()
+        shutdownContinuation = nil
+    }
+}
+
+private let shutdownCoordinator = ShutdownCoordinator()
+
+// MARK: - Entry point
+
+@main
+struct BrokerMain {
+    static func main() async throws {
+        let stderr = FileHandle.standardError
+        func log(_ msg: String) {
+            try? stderr.write(contentsOf: Data((msg + "\n").utf8))
+        }
+
+        // ── 1. Bootstrap (BR-I-04) ─────────────────────────────────────────
+        let bootstrap = Bootstrap()
+        let (vaultClient, signingKey): (VaultwardenClient, BrokerSigningKey)
+        do {
+            (vaultClient, signingKey) = try await bootstrap.unseal()
+        } catch {
+            log("shikki-secrets-brokerd: bootstrap.unseal failed — refusing to start: \(error)")
+            throw BootstrapError.unsealFailed
+        }
+
+        // ── 2. Wire collaborators ──────────────────────────────────────────
+        let kernel    = ShikkiKernel()
+        let audit     = AuditWriter()
+        let seams     = SeamsWriter()
+        let registry  = TokenRegistry()
+        let drivers   = DriverRegistry()
+        let engine    = RotationEngine(
+            drivers: drivers, audit: audit, seams: seams, registry: registry
+        )
+
+        // ManifestStore: no signed manifest injected in standalone dev mode
+        // (BR-H-02/e applies to MCP-manifest preload, not standalone socket
+        //  access). manifestSource = nil disables the preload; the store
+        //  starts empty and accepts a HUP reload from ops later.
+        let verifier      = ManifestVerifier(pinnedPublicKey: signingKey.privateKey.publicKey)
+        let manifestStore = ManifestStore(verifier: verifier, seams: seams)
+
+        // ScopeValidator: empty allowlist in standalone dev mode.
+        // secret.get requests will fail with scopePatternDenied until the
+        // operator configures allowed scopes. secret.list / secret.set
+        // bypass handleRequest and work immediately.
+        let scopeValidator = try ScopeValidator(allowlist: [])
+
+        let bridge = MCPBridge()
+
+        // Socket: resolve path from env → default.
+        let socketPath = (ProcessInfo.processInfo.environment["SHIKKI_BROKER_SOCKET"]
+            ?? (NSHomeDirectory() + "/.shikki/run/secrets-brokerd.sock")) // resolver-exempt: ShiSecretsBrokerd standalone exec; cannot import ShiKit
+        let uid = UInt32(getuid())
+        let socketConfig = UnixSocketConfig(
+            socketPath: socketPath,
+            expectedMode: 0o600,
+            expectedUid: uid
+        )
+        let socket = UnixSocketServer(config: socketConfig)
+
+        // Ensure the run directory exists.
+        let runDir = URL(fileURLWithPath: socketPath).deletingLastPathComponent().path
+        try? FileManager.default.createDirectory(
+            atPath: runDir, withIntermediateDirectories: true
+        )
+
+        // ProductionBWClient — wire the authenticated VaultwardenClient
+        // obtained from bootstrap.unseal().
+        let bwClient = ProductionBWClient()
+        await bwClient.wire(client: vaultClient)
+
+        let minter = TokenMinter(
+            registry: registry,
+            signingKey: signingKey.privateKey,
+            toolManifest: []
+        )
+
+        let daemon = BrokerDaemon(
+            kernel: kernel,
+            audit: audit,
+            seams: seams,
+            registry: registry,
+            drivers: drivers,
+            engine: engine,
+            manifestStore: manifestStore,
+            scopeValidator: scopeValidator,
+            bridge: bridge,
+            socket: socket,
+            bwClient: bwClient,
+            minter: minter,
+            bootstrap: bootstrap,
+            manifestSource: nil   // standalone: no pre-signed manifest
+        )
+
+        // ── 3. start() — preflight: socket bind + kernel job registration ─
+        do {
+            try await daemon.start()
+        } catch {
+            log("shikki-secrets-brokerd: daemon.start() failed — \(error)")
+            throw error
+        }
+
+        log("shikki-secrets-brokerd ready — socket: \(socketPath)")
+
+        // ── 4. Signal handling for graceful shutdown ───────────────────────
+        // Signal handlers are nonisolated C functions; they hand off to the
+        // actor-isolated coordinator via an unstructured Task so Swift
+        // concurrency invariants are respected.
+        let signalHandler: @convention(c) (Int32) -> Void = { _ in
+            Task { await shutdownCoordinator.triggerShutdown() }
+        }
+        signal(SIGTERM, signalHandler)
+        signal(SIGINT,  signalHandler)
+
+        // Spawn the shutdown watcher. When triggered, close the listen fd
+        // so accept() returns EBADF and runAcceptLoop exits cleanly.
+        let watchTask = Task.detached {
+            await shutdownCoordinator.waitForShutdown()
+            await socket.shutdown()
+        }
+
+        // ── 5. Accept loop — runs forever until shutdown ───────────────────
+        let dispatcher = BrokerWireDispatcher(daemon: daemon, bridge: bridge)
+        await socket.runAcceptLoop { wireRequest in
+            await dispatcher.dispatch(wireRequest, peerUid: uid)
+        }
+
+        watchTask.cancel()
+        log("shikki-secrets-brokerd: accept loop exited — daemon stopped.")
+    }
+}
