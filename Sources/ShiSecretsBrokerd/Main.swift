@@ -167,7 +167,8 @@ struct BrokerMain {
             bwClient: bwClient,
             minter: minter,
             bootstrap: bootstrap,
-            manifestSource: nil   // standalone: no pre-signed manifest
+            manifestSource: nil,   // standalone: no pre-signed manifest
+            devMode: devArgs.enabled
         )
 
         // ── 3. start() — preflight: socket bind + kernel job registration ─
