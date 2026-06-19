@@ -124,6 +124,12 @@ public actor BrokerDaemon {
 
     private var started = false
 
+    /// Dev-mode gate (spec shi-secrets-setup-install-fix-and-dev-mode-2026-06-19
+    /// RC-3). When true, `start()` skips bootstrap.unseal + kernel job
+    /// registration so the daemon binds the socket against the
+    /// pre-wired InMemoryBWClient without prod-side preflight.
+    public let devMode: Bool
+
     public init(
         kernel: ShikkiKernel,
         audit: AuditWriter,
@@ -141,7 +147,8 @@ public actor BrokerDaemon {
         manifestSource: ManifestSource? = nil,
         adminVerifier: AdminActionVerifier? = nil,
         anomalyStaging: AnomalyStaging = AnomalyStaging(),
-        activeSessions: ActiveSessions = ActiveSessions()
+        activeSessions: ActiveSessions = ActiveSessions(),
+        devMode: Bool = false
     ) {
         self.kernel = kernel
         self.audit = audit
@@ -160,6 +167,7 @@ public actor BrokerDaemon {
         self.adminVerifier = adminVerifier
         self.anomalyStaging = anomalyStaging
         self.activeSessions = activeSessions
+        self.devMode = devMode
     }
 
     // MARK: - start
@@ -178,16 +186,19 @@ public actor BrokerDaemon {
         // 1. Bootstrap (BR-I-04, W1 update). Load Vaultwarden credentials from
         // Keychain and connect. On throw, the daemon refuses to run — no socket
         // is bound, no kernel jobs registered.
-        do {
-            let (vaultClient, _) = try await bootstrap.unseal()
-            // Wire the authenticated VaultwardenClient into ProductionBWClient
-            // if the bwClient is a ProductionBWClient. InMemoryBWClient (tests)
-            // is already activated via activate() and ignores this wire.
-            if let prodClient = bwClient as? ProductionBWClient {
-                await prodClient.wire(client: vaultClient)
+        //
+        // Dev-mode SKIP — bwClient is already an activated InMemoryBWClient
+        // seeded with dev-* creds by DevModeBootstrap. No Vaultwarden
+        // contact, no Keychain unseal, no kernel job preflight.
+        if !devMode {
+            do {
+                let (vaultClient, _) = try await bootstrap.unseal()
+                if let prodClient = bwClient as? ProductionBWClient {
+                    await prodClient.wire(client: vaultClient)
+                }
+            } catch {
+                throw BrokerDaemonError.bootstrapUnsealFailed
             }
-        } catch {
-            throw BrokerDaemonError.bootstrapUnsealFailed
         }
 
         // 2. Manifest preload (BR-H-02/e). When a source was injected,
@@ -212,8 +223,11 @@ public actor BrokerDaemon {
         } catch {
             try await socket.start()
         }
-        // 4. Register exactly 6 kernel jobs (T53).
-        try await registerKernelJobs()
+        // 4. Register exactly 6 kernel jobs (T53). Dev-mode SKIP — no
+        // ShikkiKernel job loop running in standalone dev.
+        if !devMode {
+            try await registerKernelJobs()
+        }
         started = true
     }
 

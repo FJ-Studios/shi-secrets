@@ -49,15 +49,61 @@ struct BrokerMain {
             try? stderr.write(contentsOf: Data((msg + "\n").utf8))
         }
 
-        // ── 1. Bootstrap (BR-I-04) ─────────────────────────────────────────
+        // ── 0. --dev-mode arg parse (spec RC-3) ───────────────────────────
+        let cliArgs = Array(CommandLine.arguments.dropFirst())
+        let devArgs = DevModeArgs.parse(cliArgs)
+
+        // ── 1. Bootstrap — production OR dev-mode ─────────────────────────
+        let bwClient: any BWClient
+        let signingKey: BrokerSigningKey
+        let prodVaultClient: VaultwardenClient?
+        let resolvedSocketPath: String
+
+        // Used by BrokerDaemon init below; dev-mode constructs a no-op
+        // Bootstrap (won't be exercised after the in-memory bw is wired).
         let bootstrap = Bootstrap()
-        let (vaultClient, signingKey): (VaultwardenClient, BrokerSigningKey)
-        do {
-            (vaultClient, signingKey) = try await bootstrap.unseal()
-        } catch {
-            log("shikki-secrets-brokerd: bootstrap.unseal failed — refusing to start: \(error)")
-            throw BootstrapError.unsealFailed
+
+        if devArgs.enabled {
+            // Dev-mode path — no vaultwarden contact, in-memory seeded vault.
+            // Socket path comes from --socket arg or SHIKKI_BROKER_SOCKET env;
+            // production paths are refused.
+            let devSocket = devArgs.socketPath
+                ?? ProcessInfo.processInfo.environment["SHIKKI_BROKER_SOCKET"]
+                ?? "/tmp/shi-secrets-dev-\(getuid()).sock"
+            let devConfig = DevModeConfig(
+                socketPath: devSocket,
+                seedCredentials: DevModeConfig.defaultSeed
+            )
+            let devBootstrap = DevModeBootstrap(config: devConfig)
+            do {
+                let (bw, sk) = try await devBootstrap.unseal()
+                bwClient = bw
+                signingKey = sk
+                prodVaultClient = nil
+                resolvedSocketPath = devSocket
+                log("shikki-secrets-brokerd: --dev-mode ACTIVE — seeded \(devConfig.seedCredentials.count) dev-* creds, socket=\(devSocket)")
+            } catch {
+                log("shikki-secrets-brokerd: dev-mode refused — \(error)")
+                throw error
+            }
+        } else {
+            // Production path — vaultwarden contact, hardened keychain.
+            let bootstrap = Bootstrap()
+            let prodVault: VaultwardenClient
+            do {
+                (prodVault, signingKey) = try await bootstrap.unseal()
+            } catch {
+                log("shikki-secrets-brokerd: bootstrap.unseal failed — refusing to start: \(error)")
+                throw BootstrapError.unsealFailed
+            }
+            let prod = ProductionBWClient()
+            await prod.wire(client: prodVault)
+            bwClient = prod
+            prodVaultClient = prodVault
+            resolvedSocketPath = (ProcessInfo.processInfo.environment["SHIKKI_BROKER_SOCKET"]
+                ?? (NSHomeDirectory() + "/.shikki/run/secrets-brokerd.sock"))
         }
+        _ = prodVaultClient  // suppress unused warning when dev-mode
 
         // ── 2. Wire collaborators ──────────────────────────────────────────
         let kernel    = ShikkiKernel()
@@ -84,9 +130,9 @@ struct BrokerMain {
 
         let bridge = MCPBridge()
 
-        // Socket: resolve path from env → default.
-        let socketPath = (ProcessInfo.processInfo.environment["SHIKKI_BROKER_SOCKET"]
-            ?? (NSHomeDirectory() + "/.shikki/run/secrets-brokerd.sock")) // resolver-exempt: ShiSecretsBrokerd standalone exec; cannot import ShiKit
+        // Socket: dev-mode resolved its own socketPath; production reads
+        // from env/default. (bwClient was assigned in dev or prod branch above.)
+        let socketPath = resolvedSocketPath
         let uid = UInt32(getuid())
         let socketConfig = UnixSocketConfig(
             socketPath: socketPath,
@@ -100,11 +146,6 @@ struct BrokerMain {
         try? FileManager.default.createDirectory(
             atPath: runDir, withIntermediateDirectories: true
         )
-
-        // ProductionBWClient — wire the authenticated VaultwardenClient
-        // obtained from bootstrap.unseal().
-        let bwClient = ProductionBWClient()
-        await bwClient.wire(client: vaultClient)
 
         let minter = TokenMinter(
             registry: registry,
@@ -126,7 +167,8 @@ struct BrokerMain {
             bwClient: bwClient,
             minter: minter,
             bootstrap: bootstrap,
-            manifestSource: nil   // standalone: no pre-signed manifest
+            manifestSource: nil,   // standalone: no pre-signed manifest
+            devMode: devArgs.enabled
         )
 
         // ── 3. start() — preflight: socket bind + kernel job registration ─
