@@ -44,6 +44,8 @@ IDENTITY="${SHI_CODESIGN_IDENTITY:-Apple Distribution: OBYW.ONE (SH7MZH647S)}"
 echo "→ codesigning $BINARY"
 echo "  identity:     $IDENTITY"
 echo "  entitlements: $ENT"
+# The shi verb greps this exact prefix to surface to the operator.
+echo "Codesigning with: $IDENTITY"
 
 codesign \
   --sign "$IDENTITY" \
