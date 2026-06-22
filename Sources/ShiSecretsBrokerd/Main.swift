@@ -133,11 +133,12 @@ struct BrokerMain {
         // Socket: dev-mode resolved its own socketPath; production reads
         // from env/default. (bwClient was assigned in dev or prod branch above.)
         let socketPath = resolvedSocketPath
-        let uid = UInt32(getuid())
+        // HIGH-6: suppress SIGPIPE — writes to closed sockets return EPIPE instead of killing the process.
+        signal(SIGPIPE, SIG_IGN)
         let socketConfig = UnixSocketConfig(
             socketPath: socketPath,
             expectedMode: 0o600,
-            expectedUid: uid
+            expectedUid: UInt32(getuid())
         )
         let socket = UnixSocketServer(config: socketConfig)
 
@@ -199,9 +200,11 @@ struct BrokerMain {
         }
 
         // ── 5. Accept loop — runs forever until shutdown ───────────────────
+        // CRIT-1: peerUid is now threaded per-connection from peerCredentials(fd:)
+        // inside runAcceptLoop. The static uid local var is no longer used here.
         let dispatcher = BrokerWireDispatcher(daemon: daemon, bridge: bridge)
-        await socket.runAcceptLoop { wireRequest in
-            await dispatcher.dispatch(wireRequest, peerUid: uid)
+        await socket.runAcceptLoop { wireRequest, peerUid in
+            await dispatcher.dispatch(wireRequest, peerUid: peerUid)
         }
 
         watchTask.cancel()

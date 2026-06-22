@@ -15,6 +15,8 @@ import Glibc
 // going through bind/listen/accept. This isolates the serveConnection
 // + framing path from the listen-socket lifecycle and avoids needing
 // privileged operations or temp socket-file dance in tests.
+//
+// CRIT-1 update: serveConnection now takes peerUid + handler takes (WireRequest, UInt32).
 
 @Suite("UnixSocketServer accept loop + wire framer")
 struct UnixSocketServerAcceptLoopTests {
@@ -67,15 +69,18 @@ struct UnixSocketServerAcceptLoopTests {
         // Capture handler invocations.
         actor Capture {
             var seen: [WireRequest] = []
-            func record(_ r: WireRequest) { seen.append(r) }
+            var seenUids: [UInt32] = []
+            func record(_ r: WireRequest, uid: UInt32) { seen.append(r); seenUids.append(uid) }
         }
         let capture = Capture()
+        let testUid = UInt32(geteuid())
 
         let serveTask = Task.detached {
             await UnixSocketServer.serveConnection(
                 clientFd: pair.serverFd,
-                handler: { req in
-                    await capture.record(req)
+                peerUid: testUid,
+                handler: { req, uid in
+                    await capture.record(req, uid: uid)
                     return WireResponse(id: req.id, result: .string("ok"))
                 }
             )
@@ -96,6 +101,8 @@ struct UnixSocketServerAcceptLoopTests {
         #expect(seen.count == 1, "handler should have been invoked once, got \(seen.count)")
         #expect(seen.first?.method == "secret.get")
         #expect(seen.first?.id == "r1")
+        // CRIT-1: peerUid threaded correctly into handler.
+        #expect(await capture.seenUids.first == testUid, "peerUid must be threaded into handler")
     }
 
     // T-02: serveConnection writes WireResponse back to client
@@ -107,7 +114,8 @@ struct UnixSocketServerAcceptLoopTests {
         let serveTask = Task.detached {
             await UnixSocketServer.serveConnection(
                 clientFd: pair.serverFd,
-                handler: { req in
+                peerUid: UInt32(geteuid()),
+                handler: { req, _ in
                     return WireResponse(id: req.id, result: .string("hello-back"))
                 }
             )
@@ -135,7 +143,8 @@ struct UnixSocketServerAcceptLoopTests {
         let serveTask = Task.detached {
             await UnixSocketServer.serveConnection(
                 clientFd: pair.serverFd,
-                handler: { _ in
+                peerUid: UInt32(geteuid()),
+                handler: { _, _ in
                     return WireResponse(id: nil, result: .null)
                 }
             )
@@ -171,7 +180,8 @@ struct UnixSocketServerAcceptLoopTests {
         let serveTask = Task.detached {
             await UnixSocketServer.serveConnection(
                 clientFd: pair.serverFd,
-                handler: { req in
+                peerUid: UInt32(geteuid()),
+                handler: { req, _ in
                     await counter.inc()
                     return WireResponse(id: req.id, result: .int(Int64(await counter.n)))
                 }
@@ -201,7 +211,8 @@ struct UnixSocketServerAcceptLoopTests {
         let serveTask = Task.detached {
             await UnixSocketServer.serveConnection(
                 clientFd: pair.serverFd,
-                handler: { _ in
+                peerUid: UInt32(geteuid()),
+                handler: { _, _ in
                     return WireResponse(id: nil, result: .null)
                 }
             )

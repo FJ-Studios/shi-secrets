@@ -7,6 +7,35 @@ import Darwin
 import Glibc
 #endif
 
+// HIGH-5: actor-based counting semaphore for capping concurrent connections.
+actor AsyncSemaphore {
+    private var value: Int
+    private var waiters: [CheckedContinuation<Bool, Never>] = []
+
+    init(value: Int) { self.value = value }
+
+    /// Returns true if the semaphore was decremented (slot acquired).
+    func waitUnlessCancelled() async -> Bool {
+        if value > 0 {
+            value -= 1
+            return true
+        }
+        // At cap — wait.
+        return await withCheckedContinuation { continuation in
+            waiters.append(continuation)
+        }
+    }
+
+    func signal() {
+        if !waiters.isEmpty {
+            let waiter = waiters.removeFirst()
+            waiter.resume(returning: true)
+        } else {
+            value += 1
+        }
+    }
+}
+
 // UnixSocketServer — binds the broker's `/run/shikki-secrets.sock` listener
 // and enforces the 0600-owned-by-shikki-broker startup invariant
 // (BR-D-02).
@@ -72,6 +101,14 @@ public actor UnixSocketServer {
             throw UnixSocketError.bindFailed(errno: errno)
         }
         self.fd = sock
+        // HIGH-6: disable SIGPIPE on the listen socket so write() to a closed
+        // peer returns EPIPE instead of raising SIGPIPE.
+        #if canImport(Darwin)
+        var one: Int32 = 1
+        _ = withUnsafePointer(to: &one) { ptr in
+            setsockopt(sock, SOL_SOCKET, SO_NOSIGPIPE, ptr, socklen_t(MemoryLayout<Int32>.size))
+        }
+        #endif
 
         var addr = sockaddr_un()
         addr.sun_family = sa_family_t(AF_UNIX)
@@ -223,13 +260,23 @@ public actor UnixSocketServer {
     // from a snapshot, causing `accept()` to return EBADF. Phase 0.2
     // moves to non-blocking + kqueue/epoll.
 
+    /// Maximum number of concurrent connections accepted before new ones are rejected.
+    /// HIGH-5: unbounded connection spawning.
+    public static let maxConcurrentConnections = 64
+
     /// Spawn per-connection tasks via `Task.detached` until the listen
     /// fd is closed. Returns when accept() reports EBADF / EINVAL.
+    ///
+    /// CRIT-1: calls peerCredentials(fd:) on each accepted connection and
+    /// threads the kernel-reported UID into the handler. Replaces the static
+    /// getuid() fallback in Main.swift.
+    /// HIGH-5: rejects connections when the semaphore cap (64) is reached.
     public func runAcceptLoop(
-        handler: @Sendable @escaping (WireRequest) async -> WireResponse
+        handler: @Sendable @escaping (WireRequest, _ peerUid: UInt32) async -> WireResponse
     ) async {
         let serverFd = self.fd
         guard serverFd >= 0 else { return }
+        let semaphore = AsyncSemaphore(value: Self.maxConcurrentConnections)
         while true {
             var clientAddr = sockaddr_un()
             var clientLen = socklen_t(MemoryLayout<sockaddr_un>.size)
@@ -244,8 +291,25 @@ public actor UnixSocketServer {
                 if e == EINTR { continue }
                 return
             }
+            // CRIT-1: read kernel-reported peer UID before dispatching.
+            let peerUid: UInt32
+            if let cred = try? peerCredentials(fd: clientFd) {
+                peerUid = cred.uid
+            } else {
+                // If peerCredentials fails, reject the connection — no fallback.
+                close(clientFd)
+                continue
+            }
+            // HIGH-5: enforce connection cap; reject if at limit.
+            guard await semaphore.waitUnlessCancelled() else {
+                let busy = WireResponse.methodNotFound(id: "0", method: "busy")
+                _ = try? UnixSocketServer.writeFrame(clientFd: clientFd, response: busy)
+                close(clientFd)
+                continue
+            }
             Task.detached {
-                await UnixSocketServer.serveConnection(clientFd: clientFd, handler: handler)
+                await UnixSocketServer.serveConnection(clientFd: clientFd, peerUid: peerUid, handler: handler)
+                await semaphore.signal()
             }
         }
     }
@@ -261,11 +325,22 @@ public actor UnixSocketServer {
     /// Serve one client connection: read framed JSON, decode WireRequest,
     /// invoke handler, write WireResponse. Closes the connection on EOF
     /// or unrecoverable error.
+    ///
+    /// CRIT-1: peerUid is the kernel-reported UID from peerCredentials(fd:),
+    /// captured before this method is called and threaded into the handler.
     static func serveConnection(
         clientFd: Int32,
-        handler: @Sendable @escaping (WireRequest) async -> WireResponse
+        peerUid: UInt32,
+        handler: @Sendable @escaping (WireRequest, _ peerUid: UInt32) async -> WireResponse
     ) async {
         defer { close(clientFd) }
+        // HIGH-6: suppress SIGPIPE on the client fd so write() returns EPIPE on peer close.
+        #if canImport(Darwin)
+        var one: Int32 = 1
+        _ = withUnsafePointer(to: &one) { ptr in
+            setsockopt(clientFd, SOL_SOCKET, SO_NOSIGPIPE, ptr, socklen_t(MemoryLayout<Int32>.size))
+        }
+        #endif
         var buffer = Data()
         var readBuf = [UInt8](repeating: 0, count: 4096)
         while true {
@@ -283,7 +358,7 @@ public actor UnixSocketServer {
                 buffer = rest
                 let response: WireResponse
                 if let req = try? decodeWireRequest(frame) {
-                    response = await handler(req)
+                    response = await handler(req, peerUid)
                 } else {
                     response = WireResponse.parseError()
                 }
