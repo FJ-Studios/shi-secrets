@@ -125,20 +125,30 @@ public struct SecretsBrokerdCommand {
 
     // MARK: - Helpers
 
-    /// Runs a command synchronously and returns its exit code.
-    /// stdout/stderr pass through to the caller's terminal.
+    /// Runs a shell command with a timeout (default 30s) and returns its exit code.
+    /// QG-fix: wraps Process() in a Task with timeout watchdog instead of bare
+    /// waitUntilExit() (which can block indefinitely).
     @discardableResult
-    private func shell(_ args: String...) -> Int32 {
+    private func shell(_ args: String..., timeoutSeconds: TimeInterval = 30) -> Int32 {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         proc.arguments = Array(args)
         do {
             try proc.run()
-            proc.waitUntilExit()
-            return proc.terminationStatus
         } catch {
-            fputs("ERROR: Failed to run \(args.joined(separator: " ")): \(error)\n", stderr)
+            fputs("ERROR: Failed to start \(args.joined(separator: " ")): \(error)\n", stderr)
             return 127
         }
+        // Timeout watchdog via a background thread — avoids indefinite block.
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while proc.isRunning {
+            if Date() > deadline {
+                proc.terminate()
+                fputs("ERROR: \(args.joined(separator: " ")) timed out after \(Int(timeoutSeconds))s\n", stderr)
+                return 1
+            }
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        return proc.terminationStatus
     }
 }
