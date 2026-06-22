@@ -21,15 +21,19 @@ public actor BrokerWireDispatcher {
 
     private let daemon: BrokerDaemon
     private let bridge: MCPBridge
+    /// CRIT-2: the UID that owns this broker instance. Mutations (set/list/delete)
+    /// are only permitted when peerUid == ownerUid.
+    private let ownerUid: UInt32
 
-    public init(daemon: BrokerDaemon, bridge: MCPBridge) {
+    public init(daemon: BrokerDaemon, bridge: MCPBridge, ownerUid: UInt32 = UInt32(getuid())) {
         self.daemon = daemon
         self.bridge = bridge
+        self.ownerUid = ownerUid
     }
 
     /// Decode a `WireRequest` and route it to the matching handler. The
     /// `peerUid` is captured from `SO_PEERCRED` at accept(2) time
-    /// (Phase 0.1) and carried into the audit row.
+    /// and carried into the audit row and auth check.
     public func dispatch(_ request: WireRequest, peerUid: UInt32) async -> WireResponse {
         switch request.method {
 
@@ -122,9 +126,38 @@ public actor BrokerWireDispatcher {
         }
     }
 
+    // MARK: - Auth gate (CRIT-2)
+
+    /// Returns an authorization-denied WireResponse when peerUid ≠ ownerUid,
+    /// also emitting an audit row for the rejected attempt.
+    private func requireOwner(_ request: WireRequest, peerUid: UInt32) async -> WireResponse? {
+        guard peerUid == ownerUid else {
+            // Emit audit row for rejected mutation attempt (deny, no reason = write op rejection).
+            _ = try? await daemon.audit.append(.init(
+                ts: Date(),
+                tokenJti: "wire-\(request.method)-denied",
+                callerUid: Int32(bitPattern: peerUid),
+                callerTransport: .unix,
+                secretName: "(wire:\(request.method))",
+                op: .read,
+                allow: .deny,
+                reason: .scopePatternDenied,
+                llmTouched: false
+            ))
+            return WireResponse(id: request.id, error: WireError(
+                code: WireErrorCode.denied,
+                message: "Unauthorized: peerUid \(peerUid) != ownerUid \(ownerUid)"
+            ))
+        }
+        return nil
+    }
+
     // MARK: - secret.set (W3 — wired to BWClient.set)
 
     private func dispatchSecretSet(_ request: WireRequest, peerUid: UInt32) async -> WireResponse {
+        // CRIT-2: gate on owner identity before any mutation.
+        if let denied = await requireOwner(request, peerUid: peerUid) { return denied }
+
         struct SetParams: Decodable {
             let name: String
             let value: String
@@ -140,6 +173,18 @@ public actor BrokerWireDispatcher {
         }
         do {
             try await daemon.bwClient.set(name: params.name, value: params.value)
+            // CRIT-2: audit every mutation.
+            _ = try? await daemon.audit.append(.init(
+                ts: Date(),
+                tokenJti: "wire-set-\(UUID().uuidString.prefix(8))",
+                callerUid: Int32(bitPattern: peerUid),
+                callerTransport: .unix,
+                secretName: String(params.name.prefix(AuditWriter.maxSecretNameLength)),
+                op: .rotate,
+                allow: .allow,
+                reason: nil,
+                llmTouched: false
+            ))
             return WireResponse(id: request.id, result: .object(["ok": .bool(true)]))
         } catch {
             return WireResponse(id: request.id, error: WireError(
@@ -152,6 +197,9 @@ public actor BrokerWireDispatcher {
     // MARK: - secret.list (W3 — wired to BWClient.list)
 
     private func dispatchSecretList(_ request: WireRequest, peerUid: UInt32) async -> WireResponse {
+        // CRIT-2: gate on owner identity — listing is a read op but exposes all names.
+        if let denied = await requireOwner(request, peerUid: peerUid) { return denied }
+
         struct ListParams: Decodable {
             let filter: String?
         }
@@ -198,6 +246,18 @@ public actor BrokerWireDispatcher {
                 let data = try encoder.encode(ref)
                 return try JSONDecoder().decode(JSONValue.self, from: data)
             }
+            // CRIT-2: audit list access.
+            _ = try? await daemon.audit.append(.init(
+                ts: Date(),
+                tokenJti: "wire-list-\(UUID().uuidString.prefix(8))",
+                callerUid: Int32(bitPattern: peerUid),
+                callerTransport: .unix,
+                secretName: "(list)",
+                op: .read,
+                allow: .allow,
+                reason: nil,
+                llmTouched: false
+            ))
             return WireResponse(id: request.id, result: .array(items))
         } catch {
             return WireResponse(id: request.id, error: WireError(
@@ -210,6 +270,9 @@ public actor BrokerWireDispatcher {
     // MARK: - secret.delete (W3 — wired to BWClient.delete)
 
     private func dispatchSecretDelete(_ request: WireRequest, peerUid: UInt32) async -> WireResponse {
+        // CRIT-2: gate on owner identity before any mutation.
+        if let denied = await requireOwner(request, peerUid: peerUid) { return denied }
+
         struct DeleteParams: Decodable {
             let name: String
         }
@@ -224,6 +287,18 @@ public actor BrokerWireDispatcher {
         }
         do {
             try await daemon.bwClient.delete(name: params.name)
+            // CRIT-2: audit every mutation.
+            _ = try? await daemon.audit.append(.init(
+                ts: Date(),
+                tokenJti: "wire-delete-\(UUID().uuidString.prefix(8))",
+                callerUid: Int32(bitPattern: peerUid),
+                callerTransport: .unix,
+                secretName: String(params.name.prefix(AuditWriter.maxSecretNameLength)),
+                op: .rotate,
+                allow: .allow,
+                reason: nil,
+                llmTouched: false
+            ))
             return WireResponse(id: request.id, result: .object(["ok": .bool(true)]))
         } catch {
             return WireResponse(id: request.id, error: WireError(
