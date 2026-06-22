@@ -76,4 +76,50 @@ struct UnixSocketServerTests {
         }
         await server.shutdown()
     }
+
+    // MARK: - Orphan socket cleanup (TCP-OSC)
+
+    @Test("TCP-OSC-01: stale socket file present before start — bind succeeds (unlink on startup)")
+    func test_socket_staleSocketPresent_startSucceeds() async throws {
+        let path = tempSocketPath()
+        // Pre-create a stale socket file (simulates a previous crash leaving the socket behind)
+        let staleCreated = Foundation.FileManager.default.createFile(atPath: path, contents: nil)
+        #expect(staleCreated, "precondition: stale socket file creation should succeed")
+        #expect(Foundation.FileManager.default.fileExists(atPath: path), "stale socket must exist before start")
+
+        let config = UnixSocketConfig(socketPath: path, expectedMode: 0o600, expectedUid: UInt32(geteuid()))
+        let server = UnixSocketServer(config: config)
+
+        // start() must succeed despite the pre-existing file (it calls unlink first)
+        do {
+            try await server.start()
+        } catch {
+            Issue.record("start() must not throw when a stale socket exists; got \(error)")
+            return
+        }
+
+        // Socket must now exist as a real socket (not the placeholder file)
+        var st = stat()
+        #expect(stat(path, &st) == 0, "socket file must exist after start")
+        #expect(UInt16(st.st_mode) & 0o777 == 0o600, "mode must be 0600")
+
+        await server.shutdown()
+
+        // After shutdown the socket file must be removed
+        #expect(!Foundation.FileManager.default.fileExists(atPath: path), "socket file must be removed after shutdown")
+    }
+
+    @Test("TCP-OSC-02: shutdown removes socket file from disk")
+    func test_socket_shutdown_removesSocketFile() async throws {
+        let path = tempSocketPath()
+        let config = UnixSocketConfig(socketPath: path, expectedMode: 0o600, expectedUid: UInt32(geteuid()))
+        let server = UnixSocketServer(config: config)
+        try await server.start()
+
+        #expect(Foundation.FileManager.default.fileExists(atPath: path), "socket must exist after start")
+
+        await server.shutdown()
+
+        #expect(!Foundation.FileManager.default.fileExists(atPath: path), "socket must be removed after shutdown")
+    }
 }
