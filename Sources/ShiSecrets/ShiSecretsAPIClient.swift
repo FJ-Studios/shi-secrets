@@ -4,17 +4,44 @@
 // Does NOT add new wire methods — delegates to the protocol methods that already
 // exist in ProductionBrokerClient (shipped in Waves 1-5).
 //
+// CRIT-4 fix: requestEphemeral() now returns a JTI (not plaintext). The plaintext
+// is stored in an actor-isolated EphemeralStore within this process only. Callers
+// retrieve it via get(jti:) which is single-use (auto-evicts on first call).
+//
 // W3+W4 of features/shi-secrets-uri-scheme-and-plugin-extraction-2026-05-31.md.
 
 import Foundation
 import ShiSecretsClient
 import ShiSecretsKit
 
+/// CRIT-4: actor-isolated single-use store for ephemeral JTI → plaintext mapping.
+/// Entries expire after 60s and are consumed on first retrieval.
+private actor EphemeralStore {
+    private struct Entry {
+        let plaintext: String
+        let expiresAt: Date
+    }
+    private var store: [String: Entry] = [:]
+
+    func store(jti: String, plaintext: String) {
+        let expiry = Date().addingTimeInterval(60)
+        store[jti] = Entry(plaintext: plaintext, expiresAt: expiry)
+    }
+
+    func consume(jti: String) -> String? {
+        guard let entry = store.removeValue(forKey: jti) else { return nil }
+        if Date() >= entry.expiresAt { return nil }
+        return entry.plaintext
+    }
+}
+
 /// Adapter for the shi-secrets broker daemon, providing URI-shaped methods
 /// for the 9 W3+W4 CLI commands.
 public final class ShiSecretsAPIClient: Sendable {
 
     private let socket: String
+    /// CRIT-4: per-instance ephemeral store; not shared across instances.
+    private let ephemeralStore = EphemeralStore()
 
     public init(socket: String) {
         self.socket = socket
@@ -54,12 +81,20 @@ public final class ShiSecretsAPIClient: Sendable {
         return entries.map { "shi-secret://\($0.name)" }
     }
 
+    /// CRIT-4: returns a JTI (not plaintext). The plaintext is stored in
+    /// the actor-isolated EphemeralStore and retrieved via get(jti:).
     public func requestEphemeral(uri: ShiSecretURI) async throws -> String {
-        // The broker returns a full secret value; for "ephemeral token" mode
-        // we wrap the value in a signed JTI. Phase-1 simplification: return
-        // the value itself as the "token" since the broker already manages TTL.
         let client = ProductionBrokerClient(socket: SocketConnection())
-        return try await client.get(name: uri.qualifiedKey)
+        let plaintext = try await client.get(name: uri.qualifiedKey)
+        let jti = UUID().uuidString
+        await ephemeralStore.store(jti: jti, plaintext: plaintext)
+        return jti
+    }
+
+    /// CRIT-4: single-use JTI → plaintext exchange. Returns nil if the JTI
+    /// is unknown, expired, or already consumed.
+    public func get(jti: String) async -> String? {
+        await ephemeralStore.consume(jti: jti)
     }
 
     public func resolveValue(uri: ShiSecretURI) async throws -> String {
