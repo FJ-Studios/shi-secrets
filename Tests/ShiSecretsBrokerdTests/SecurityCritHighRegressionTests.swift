@@ -312,13 +312,119 @@ struct SecurityCritHighRegressionTests {
         #expect(matches == 1, "CRIT-4: JTI must be UUID format, not a plaintext secret; got: \(jti)")
     }
 
-    // MARK: - HIGH-5: Semaphore cap
+    // MARK: - HIGH-5 / NEW-M1: Semaphore cap-and-reject
 
     @Test("HIGH-5: maxConcurrentConnections constant is 64")
     func high5_maxConcurrentConnections() {
         #expect(
             UnixSocketServer.maxConcurrentConnections == 64,
             "HIGH-5: connection cap must be 64"
+        )
+    }
+
+    /// NEW-M1 regression: AsyncSemaphore.tryWait() rejects immediately when at cap.
+    /// Previously waitUnlessCancelled() would queue connections indefinitely.
+    /// Burst 100 acquisitions against a cap=64 semaphore; expect ≥36 rejected (not queued).
+    @Test("NEW-M1: AsyncSemaphore.tryWait() rejects immediately at cap — burst 100 against cap=64 expects ≥36 rejected")
+    func newM1_semaphoreTryWait_rejectsAtCap() async {
+        let cap = 64
+        let burst = 100
+        let sem = AsyncSemaphore(value: cap)
+
+        // Acquire cap slots — all should succeed.
+        var acquired = 0
+        for _ in 0..<cap {
+            if await sem.tryWait() { acquired += 1 }
+        }
+        #expect(acquired == cap, "NEW-M1: first \(cap) tryWait() calls must all succeed")
+
+        // Next burst - cap acquisitions must ALL be rejected immediately (not queued).
+        var rejected = 0
+        for _ in 0..<(burst - cap) {
+            if !(await sem.tryWait()) { rejected += 1 }
+        }
+        let expectedRejected = burst - cap  // 36
+        #expect(
+            rejected >= expectedRejected,
+            "NEW-M1: at-cap connections must be rejected immediately; expected ≥\(expectedRejected) rejections, got \(rejected)"
+        )
+
+        // Release one slot; next tryWait() must now succeed.
+        await sem.signal()
+        let reacquired = await sem.tryWait()
+        #expect(reacquired, "NEW-M1: after releasing one slot, tryWait() must succeed again")
+    }
+
+    // MARK: - NEW-M3: SecretsToEnvCommand audit-warn on plaintext resolve
+
+    /// NEW-M3 regression: SecretsToEnvCommand must emit a BR-G-01 audit-warn
+    /// to stderr before resolving any plaintext secret URI.
+    /// We verify by redirecting stderr to a pipe and checking the written bytes.
+    @Test("NEW-M3: SecretsToEnvCommand emits BR-G-01 audit-warn to stderr before plaintext resolve")
+    func newM3_secretsToEnvCommand_emitsAuditWarnToStderr() async throws {
+        // Redirect stderr to a pipe so we can capture the audit-warn lines.
+        // Save the original stderr fd so we can restore it after the test.
+        let savedStderr = dup(STDERR_FILENO)
+        guard savedStderr >= 0 else {
+            throw POSIXError(.EBADF)
+        }
+        var pipeFds: [Int32] = [-1, -1]
+        let pipeRc = pipeFds.withUnsafeMutableBufferPointer { ptr -> Int32 in
+            pipe(ptr.baseAddress!)
+        }
+        guard pipeRc == 0 else { throw POSIXError(.EPIPE) }
+        let readFd = pipeFds[0]
+        let writeFd = pipeFds[1]
+
+        // Redirect stderr → write end of pipe.
+        dup2(writeFd, STDERR_FILENO)
+        close(writeFd)
+
+        // Run the command. It will fail quickly (no live broker), but the
+        // audit-warn must be emitted BEFORE any broker call — checking stderr
+        // output is the correct regression signal for BR-G-01 compliance.
+        //
+        // We use a command that has no secrets when secrets array is empty,
+        // so the warn is still emitted (it's before the loop).
+        let cmd = SecretsToEnvCommand(
+            secrets: [("TEST_KEY", "shi-secret://prod/test-key")],
+            command: ["/usr/bin/true"]
+        )
+        // The command will fail to connect to broker (no socket), but the warn
+        // is printed before the client call — so stderr should contain it.
+        _ = try? await cmd.run(brokerSocket: "/tmp/nonexistent-\(UUID().uuidString).sock")
+
+        // Restore stderr before reading (so test framework can write to it).
+        dup2(savedStderr, STDERR_FILENO)
+        close(savedStderr)
+
+        // Read captured stderr output.
+        // Set read end to non-blocking so we don't hang if nothing was written.
+        let flags = fcntl(readFd, F_GETFL)
+        _ = fcntl(readFd, F_SETFL, flags | O_NONBLOCK)
+
+        var captured = Data()
+        var buf = [UInt8](repeating: 0, count: 4096)
+        while true {
+            let n = buf.withUnsafeMutableBufferPointer { ptr in
+                read(readFd, ptr.baseAddress, ptr.count)
+            }
+            if n <= 0 { break }
+            captured.append(contentsOf: buf[0..<n])
+        }
+        close(readFd)
+
+        let output = String(data: captured, encoding: .utf8) ?? ""
+
+        // Assert: the BR-G-01 audit-warn banner is present.
+        #expect(
+            output.contains("WARNING: shi secrets to-env resolves plaintext"),
+            "NEW-M3: SecretsToEnvCommand must emit BR-G-01 audit-warn to stderr; got: \(output.prefix(200))"
+        )
+        // Assert: per-URI AUDIT-WARN line is present for each resolved key.
+        #expect(
+            output.contains("AUDIT-WARN: plaintext resolve for env key TEST_KEY"),
+            "NEW-M3: per-URI audit-warn line must identify the env key; got: \(output.prefix(200))"
         )
     }
 

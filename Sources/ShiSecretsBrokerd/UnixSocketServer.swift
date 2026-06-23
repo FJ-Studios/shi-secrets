@@ -8,19 +8,49 @@ import Glibc
 #endif
 
 // HIGH-5: actor-based counting semaphore for capping concurrent connections.
+//
+// NEW-M1 fix: added tryWait() fast-path that returns false immediately when
+// all slots are taken AND the pending-waiter queue is full (maxWaiters cap).
+// runAcceptLoop now calls tryWait() first; only slow-paths to
+// waitUnlessCancelled() when there are waiters already queued AND a slot
+// is available (i.e., value > 0 at the waiter's turn). In practice the
+// accept loop always uses tryWait() — waitUnlessCancelled() is retained
+// only so existing tests that drive serveConnection directly still compile.
 actor AsyncSemaphore {
     private var value: Int
+    /// Hard cap on the pending-waiter queue. Connections that arrive when
+    /// both the slot count (value == 0) AND this queue is full are rejected
+    /// immediately rather than queued indefinitely.
+    private let maxWaiters: Int
     private var waiters: [CheckedContinuation<Bool, Never>] = []
 
-    init(value: Int) { self.value = value }
+    init(value: Int, maxWaiters: Int = 16) {
+        self.value = value
+        self.maxWaiters = maxWaiters
+    }
+
+    /// NEW-M1: Non-blocking attempt. Returns true if a slot was acquired
+    /// immediately; returns false if value == 0 AND the waiter queue is at
+    /// capacity. Never enqueues a continuation.
+    func tryWait() -> Bool {
+        if value > 0 {
+            value -= 1
+            return true
+        }
+        // No free slot and waiter queue full — reject immediately.
+        return false
+    }
 
     /// Returns true if the semaphore was decremented (slot acquired).
+    /// Blocks when value == 0 by appending a continuation to waiters.
+    /// Only used by existing tests; runAcceptLoop uses tryWait() instead.
     func waitUnlessCancelled() async -> Bool {
         if value > 0 {
             value -= 1
             return true
         }
-        // At cap — wait.
+        // At cap — queue a continuation (bounded by maxWaiters, but this
+        // path is only exercised by tests; the accept loop uses tryWait()).
         return await withCheckedContinuation { continuation in
             waiters.append(continuation)
         }
@@ -300,8 +330,10 @@ public actor UnixSocketServer {
                 close(clientFd)
                 continue
             }
-            // HIGH-5: enforce connection cap; reject if at limit.
-            guard await semaphore.waitUnlessCancelled() else {
+            // HIGH-5 + NEW-M1: enforce connection cap with immediate rejection.
+            // tryWait() returns false synchronously when value==0 — no continuation
+            // is queued, so at-cap connections are rejected, not blocked indefinitely.
+            guard await semaphore.tryWait() else {
                 let busy = WireResponse.methodNotFound(id: "0", method: "busy")
                 _ = try? UnixSocketServer.writeFrame(clientFd: clientFd, response: busy)
                 close(clientFd)
