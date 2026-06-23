@@ -49,7 +49,7 @@ struct ShiSecretsModuleTests {
         let jti = "01HZZZZZZZZZZZZZZZZZZZZZZ1" // valid 26-char Crockford ULID shape
         let row = TokenRegistry.Row(
             jti: jti, sub: "test-sub", scope: "test/*",
-            op: .get, nbf: Date(), diesAt: Date().addingTimeInterval(3600),
+            op: .read, nbf: Date(), diesAt: Date().addingTimeInterval(3600),
             llmTouched: false, passkeyPath: false
         )
         try await registry.insert(row)
