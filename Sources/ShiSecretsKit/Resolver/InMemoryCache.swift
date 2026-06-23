@@ -75,6 +75,38 @@ public actor InMemoryCache {
         self.isRevoked = isRevoked
     }
 
+    /// NEW-M2: Convenience init that auto-wires a `TokenRegistry`-backed
+    /// revocation closure. Production DI paths must use this overload so
+    /// that per-JTI revocation is active without operator-discipline overhead.
+    ///
+    /// Swift 6 note: `TokenRegistry.isRevoked(jti:)` is an actor-isolated
+    /// `func` — it cannot be called from a `@Sendable` sync closure without
+    /// crossing the actor boundary. We bridge via a `nonisolated(unsafe)` var
+    /// in combination with a `DispatchSemaphore` so the closure remains
+    /// synchronous (the `InMemoryCache` stored closure type is `(@Sendable
+    /// (String) -> Bool)?`). The `nonisolated(unsafe)` annotation is correct
+    /// here: `result` is written by the `Task` body on the registry actor's
+    /// executor and read only after `sema.wait()` guarantees the write has
+    /// completed — no concurrent access is possible.
+    public init(
+        ttl: TimeInterval = InMemoryCache.defaultTTL,
+        clock: @escaping @Sendable () -> Date = { Date() },
+        tokenRegistry: TokenRegistry
+    ) {
+        self.ttl = ttl
+        self.clock = clock
+        self.isRevoked = { jti in
+            nonisolated(unsafe) var result = false
+            let sema = DispatchSemaphore(value: 0)
+            Task {
+                result = await tokenRegistry.isRevoked(jti: jti)
+                sema.signal()
+            }
+            sema.wait()
+            return result
+        }
+    }
+
     // MARK: - Cache operations
 
     /// Returns the cached value for `uri` if it exists, has not expired,
