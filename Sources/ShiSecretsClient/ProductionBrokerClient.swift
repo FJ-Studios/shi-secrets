@@ -53,7 +53,7 @@ public actor ProductionBrokerClient: BrokerClient {
         }
         let entries: [VaultEntryRef] = try items.map { item in
             let data = try jsonValueToData(item)
-            return try JSONDecoder().decode(VaultEntryRef.self, from: data)
+            return try decodeResult(item, as: VaultEntryRef.self)
         }
         return entries
     }
@@ -135,7 +135,9 @@ public actor ProductionBrokerClient: BrokerClient {
 
     private func decodeResult<T: Decodable>(_ value: JSONValue, as type: T.Type) throws -> T {
         let data = try jsonValueToData(value)
-        return try JSONDecoder().decode(type, from: data)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(type, from: data)
     }
 
     private func jsonValueToData(_ value: JSONValue) throws -> Data {
