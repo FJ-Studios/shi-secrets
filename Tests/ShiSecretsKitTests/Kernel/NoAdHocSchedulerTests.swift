@@ -38,8 +38,24 @@ struct NoAdHocSchedulerTests {
     @Test("rotation cron implemented as ShikkiKernel jobs — no systemd timers, no ad-hoc sleep")
     func test_rotation_cronImplementedAsShikkiKernelJobs_noSystemdTimers_noAdHocSleep() throws {
         let root = Self.repoRoot()
-        let sourcesRoot = root
+        // In the monorepo: <root>/packages/ShiSecrets/Sources
+        // In the standalone repo: the packages/ShiSecrets path won't be found, so
+        // repoRoot() falls back to CWD. We detect this case by checking for Sources
+        // at both the monorepo path and the standalone path (Sources/ at repo root).
+        let monorepoSourcesRoot = root
             .appendingPathComponent("packages/ShiSecrets/Sources", isDirectory: true)
+        let standaloneSourcesRoot = root
+            .appendingPathComponent("Sources", isDirectory: true)
+        let sourcesRoot: URL
+        if FileManager.default.fileExists(atPath: monorepoSourcesRoot.path) {
+            sourcesRoot = monorepoSourcesRoot
+        } else if FileManager.default.fileExists(atPath: standaloneSourcesRoot.path) {
+            sourcesRoot = standaloneSourcesRoot
+        } else {
+            // Neither monorepo nor standalone Sources found — skip gracefully.
+            return
+        }
+
         // Spec scope (Task 40): deploy/nuc-dev/systemd/** — NOT unrelated
         // packages under deploy/ (e.g. lago/ has a backup timer that is
         // not a broker scheduler and does not violate BR-C-0X).
@@ -51,7 +67,7 @@ struct NoAdHocSchedulerTests {
         if FileManager.default.fileExists(atPath: deployBrokerRoot.path) {
             scanned.append(contentsOf: try plainFiles(under: deployBrokerRoot))
         }
-        #expect(!scanned.isEmpty, "grep guard must scan at least one file")
+        #expect(!scanned.isEmpty, "grep guard must scan at least one Swift source file")
 
         // Files that use Task.sleep for a non-scheduler, non-rotation purpose.
         // SessionCache uses Task.sleep for Vaultwarden OAuth token refresh

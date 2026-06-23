@@ -57,7 +57,7 @@ struct SecretsLifecycleTests {
             ]),
             id: "lc01"
         )
-        let resp = await dispatcher.dispatch(req, peerUid: UInt32(ProcessInfo.processInfo.processIdentifier))
+        let resp = await dispatcher.dispatch(req, peerUid: UInt32(geteuid()))
         // The daemon requires a valid vault session — InMemoryBWClient is activated.
         // The TokenMinter will mint an ephemeralToken or deny (scope mismatch is ok).
         // What MUST NOT happen: a crash or an unhandled methodNotFound.
@@ -78,7 +78,7 @@ struct SecretsLifecycleTests {
             params: .object([:]),
             id: "lc02"
         )
-        let resp = await dispatcher.dispatch(req, peerUid: UInt32(getpid()))
+        let resp = await dispatcher.dispatch(req, peerUid: UInt32(geteuid()))
         #expect(resp.error == nil, "secret.list must not error")
         if case .array(let items) = resp.result {
             // Phase 0.8: empty array is the expected response.
@@ -99,7 +99,7 @@ struct SecretsLifecycleTests {
             params: .object(["name": .string("foo")]),
             id: "lc03"
         )
-        let resp = await dispatcher.dispatch(req, peerUid: UInt32(getpid()))
+        let resp = await dispatcher.dispatch(req, peerUid: UInt32(geteuid()))
         #expect(resp.error == nil, "secret.delete must not error")
         if case .object(let obj) = resp.result {
             #expect(obj["ok"] == .bool(true))
@@ -124,7 +124,7 @@ struct SecretsLifecycleTests {
             ]),
             id: "lc04"
         )
-        let resp = await dispatcher.dispatch(req, peerUid: UInt32(getpid()))
+        let resp = await dispatcher.dispatch(req, peerUid: UInt32(geteuid()))
         // We got a response — this means the socket IS up. The response may be
         // a token (if fakeVault has the entry) or a deny (if not) — either is fine.
         // What must NOT happen: a WireError with code == -32600 (parse error / transport error).
@@ -163,7 +163,7 @@ struct SecretsLifecycleTests {
                         params: .object([:]),
                         id: "concurrent-\(i)"
                     )
-                    return await dispatcher.dispatch(req, peerUid: UInt32(getpid()))
+                    return await dispatcher.dispatch(req, peerUid: UInt32(geteuid()))
                 }
             }
             var count = 0
@@ -194,7 +194,7 @@ struct SecretsLifecycleTests {
             ]),
             id: "lc07"
         )
-        _ = await dispatcher.dispatch(req, peerUid: UInt32(getpid()))
+        _ = await dispatcher.dispatch(req, peerUid: UInt32(geteuid()))
         let auditAfter = await stack.audit.all()
         #expect(auditAfter.count > auditBefore.count,
                 "audit writer must record at least one row per secret.get dispatch")
@@ -203,6 +203,7 @@ struct SecretsLifecycleTests {
 
 // MARK: - Helpers
 
-private func getpid() -> Int32 {
-    ProcessInfo.processInfo.processIdentifier
-}
+// NOTE: geteuid() is imported from Darwin/Glibc above.
+// peerUid in tests MUST be the effective UID (geteuid), not the process ID (getpid).
+// BrokerWireDispatcher defaults ownerUid = getuid() — which equals geteuid() in
+// a non-setuid context. Passing getpid() was a test bug: PID != UID.
