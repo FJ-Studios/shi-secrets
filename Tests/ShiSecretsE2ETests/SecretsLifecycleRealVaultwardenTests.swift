@@ -3,6 +3,12 @@ import Foundation
 @testable import ShiSecretsKit
 import Testing
 
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
+
 // SecretsLifecycleRealVaultwardenTests — W3 end-to-end tests against a
 // mock Vaultwarden server that faithfully implements /api/ciphers CRUD.
 //
@@ -308,18 +314,24 @@ struct SecretsLifecycleRealVaultwardenTests {
             ]),
             id: "r05-set"
         )
-        let setResp = await dispatcher.dispatch(setReq, peerUid: UInt32(ProcessInfo.processInfo.processIdentifier))
+        let setResp = await dispatcher.dispatch(setReq, peerUid: UInt32(geteuid()))
         #expect(setResp.error == nil, "secret.set must not return error; got: \(String(describing: setResp.error))")
         if case .object(let obj) = setResp.result {
             #expect(obj["ok"] == .bool(true), "secret.set result.ok must be true")
         }
 
-        // secret.list
+        // secret.list — Bug-2 fix: returns [VaultEntryRef] objects, not bare strings.
+        // Extract "name" field from each object to check membership.
         let listReq = WireRequest(method: "secret.list", params: nil, id: "r05-list")
-        let listResp = await dispatcher.dispatch(listReq, peerUid: UInt32(ProcessInfo.processInfo.processIdentifier))
+        let listResp = await dispatcher.dispatch(listReq, peerUid: UInt32(geteuid()))
         #expect(listResp.error == nil, "secret.list must not error")
         if case .array(let items) = listResp.result {
-            #expect(items.contains(.string("test-wire-key")), "list must include set key")
+            let names = items.compactMap { item -> String? in
+                guard case .object(let obj) = item,
+                      case .string(let n) = obj["name"] else { return nil }
+                return n
+            }
+            #expect(names.contains("test-wire-key"), "list must include set key; names=\(names)")
         }
 
         // secret.delete
@@ -328,14 +340,19 @@ struct SecretsLifecycleRealVaultwardenTests {
             params: .object(["name": .string("test-wire-key")]),
             id: "r05-del"
         )
-        let delResp = await dispatcher.dispatch(delReq, peerUid: UInt32(ProcessInfo.processInfo.processIdentifier))
+        let delResp = await dispatcher.dispatch(delReq, peerUid: UInt32(geteuid()))
         #expect(delResp.error == nil, "secret.delete must not error")
 
         // secret.list after delete — must not contain key
         let listReq2 = WireRequest(method: "secret.list", params: nil, id: "r05-list2")
-        let listResp2 = await dispatcher.dispatch(listReq2, peerUid: UInt32(ProcessInfo.processInfo.processIdentifier))
+        let listResp2 = await dispatcher.dispatch(listReq2, peerUid: UInt32(geteuid()))
         if case .array(let items2) = listResp2.result {
-            #expect(!items2.contains(.string("test-wire-key")), "list after delete must not include key")
+            let names2 = items2.compactMap { item -> String? in
+                guard case .object(let obj) = item,
+                      case .string(let n) = obj["name"] else { return nil }
+                return n
+            }
+            #expect(!names2.contains("test-wire-key"), "list after delete must not include key; names=\(names2)")
         }
     }
 }
