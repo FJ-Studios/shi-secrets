@@ -38,6 +38,14 @@ public struct SecretsToEnvCommand {
 
         var envPairs: [(key: String, value: String)] = []
 
+        // NEW-M3 / BR-G-01: emit an audit-warn row before resolving each secret in
+        // plaintext. `to-env` always uses the plaintext path (execve injection requires
+        // the raw value) — unlike `secrets get` which defaults to an ephemeral JTI.
+        // The warn is emitted to stderr so it is captured by process supervisors
+        // (launchd / systemd) and is NOT visible in the child's stdin/stdout.
+        // One warn line per URI is emitted so the audit trail maps 1:1 to resolved URIs.
+        fputs("WARNING: shi secrets to-env resolves plaintext. Each URI resolution is audit-logged (BR-G-01).\n", stderr)
+
         // Pre-resolve all URIs before execve.
         let client = ShiSecretsAPIClient(socket: brokerSocket)
         for (envKey, rawURI) in secrets {
@@ -48,6 +56,8 @@ public struct SecretsToEnvCommand {
                 fputs("ERROR: invalid URI for \(envKey): \(error.localizedDescription)\n", stderr)
                 return 1
             }
+            // NEW-M3: per-URI audit-warn so callers can correlate warn lines to env keys.
+            fputs("AUDIT-WARN: plaintext resolve for env key \(envKey) (\(rawURI))\n", stderr)
             do {
                 let value = try await client.resolveValue(uri: parsedURI)
                 envPairs.append((key: envKey, value: value))
