@@ -24,6 +24,7 @@ public struct ShiSecretsPlugin: PluginCLISurface {
         "blast-radius",
         "revoke",
         "audit",
+        "brokerd",
     ]
 
     /// Dispatch entry-point called by shikki-cli for `shi secrets <subVerb> [args...]`.
@@ -141,6 +142,17 @@ public struct ShiSecretsPlugin: PluginCLISurface {
             }
             return try await SecretsAuditCommand(since: since, caller: caller, namespace: namespace, json: jsonFlag)
                 .run(brokerSocket: socketPath)
+
+        case "brokerd":
+            // Bug 3 fix: `shi secrets brokerd start` must NEVER call `swift build`.
+            // The pre-built binary ships via `shi pickup shi-secrets` into
+            // ~/.shikki/bin/shikki-secrets-brokerd. If it exists, use launchctl
+            // to load the plist. If missing, surface a clear reinstall hint.
+            guard let action = args.first else {
+                fputs("Usage: shi secrets brokerd <start|stop|status>\n", stderr)
+                return 1
+            }
+            return try await SecretsBrokerdCommand(action: action).run()
 
         default:
             fputs("Unknown secrets sub-verb: \(subVerb). Try: \(subVerbs.joined(separator: ", "))\n", stderr)

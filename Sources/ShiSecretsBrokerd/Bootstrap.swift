@@ -159,9 +159,15 @@ public struct Bootstrap {
         #if os(Linux)
         throw BootstrapError.signingKeyMissing
         #else
-        // macOS: ephemeral dev key — not for production.
+        // HIGH-7: ephemeral key fallback is dev/CI ONLY. Production macOS must
+        // supply the key via CREDENTIALS_DIRECTORY (same as Linux). When not in
+        // DEBUG mode, treat a missing signing key as a hard error.
+        #if DEBUG
         let devKey = Curve25519.Signing.PrivateKey()
         return BrokerSigningKey(privateKey: devKey)
+        #else
+        throw BootstrapError.signingKeyMissing
+        #endif
         #endif
     }
 

@@ -68,6 +68,17 @@ public struct ShiSecretsModule: DIModule {
         c.registerLazy(SeamsWriter.self) { SeamsWriter() }
         c.registerLazy(TokenRegistry.self) { TokenRegistry() }
 
+        // --- NEW-M2: InMemoryCache wired to TokenRegistry for per-JTI revocation.
+        // Uses the convenience init(tokenRegistry:) so isRevoked closure is auto-wired.
+        // Without this registration, callers that construct InMemoryCache() directly
+        // get isRevoked=nil (revocation silently disabled) — CRIT-3 gap closed here.
+        c.registerLazy(InMemoryCache.self) {
+            guard let registry = c.tryResolve(TokenRegistry.self) else {
+                preconditionFailure("TokenRegistry not registered before InMemoryCache — NEW-M2 wiring requires TokenRegistry first")
+            }
+            return InMemoryCache(tokenRegistry: registry)
+        }
+
         // --- ScopeValidator needs the allowlist ---
         c.registerLazy(ScopeValidator.self) {
             let allow = c.tryResolve(EntitlementAllowlist.self) ?? EntitlementAllowlist(globs: [])

@@ -21,15 +21,19 @@ public actor BrokerWireDispatcher {
 
     private let daemon: BrokerDaemon
     private let bridge: MCPBridge
+    /// CRIT-2: the UID that owns this broker instance. Mutations (set/list/delete)
+    /// are only permitted when peerUid == ownerUid.
+    private let ownerUid: UInt32
 
-    public init(daemon: BrokerDaemon, bridge: MCPBridge) {
+    public init(daemon: BrokerDaemon, bridge: MCPBridge, ownerUid: UInt32 = UInt32(getuid())) {
         self.daemon = daemon
         self.bridge = bridge
+        self.ownerUid = ownerUid
     }
 
     /// Decode a `WireRequest` and route it to the matching handler. The
     /// `peerUid` is captured from `SO_PEERCRED` at accept(2) time
-    /// (Phase 0.1) and carried into the audit row.
+    /// and carried into the audit row and auth check.
     public func dispatch(_ request: WireRequest, peerUid: UInt32) async -> WireResponse {
         switch request.method {
 
@@ -53,11 +57,38 @@ public actor BrokerWireDispatcher {
     }
 
     private func dispatchSecretGet(_ request: WireRequest, peerUid: UInt32) async -> WireResponse {
-        // Decode params into a BrokerRequest. The wire shape:
+        // Bug 1 fix: accept BOTH wire shapes for backward-compatibility.
+        //
+        // Shape A (canonical broker form):
         //   { sub: String, scope: String, op: "read"|"rotate", ttl: Int, toolName?: String }
+        //
+        // Shape B (client shorthand — ProductionBrokerClient.get(name:) sends this):
+        //   { name: String }
+        //
+        // When Shape B is received, translate to Shape A using defaults:
+        //   sub   = current process username ($USER env or NSUserName())
+        //   scope = <name>   (the secret name IS the scope path)
+        //   op    = "read"
+        //   ttl   = 300
         let params: SecretGetParams
         do {
-            params = try decodeParams(SecretGetParams.self, from: request.params)
+            // Try Shape A first (full canonical params).
+            if let canonical = try? decodeParams(SecretGetParams.self, from: request.params) {
+                params = canonical
+            } else {
+                // Try Shape B: { name: String } — translate to canonical form.
+                struct NameOnlyParams: Decodable { let name: String }
+                let nameParams = try decodeParams(NameOnlyParams.self, from: request.params)
+                // Map name → scope (the secret name IS the scope path in the broker model).
+                params = SecretGetParams(
+                    sub: ProcessInfo.processInfo.environment["USER"] ?? NSUserName(),
+                    scope: nameParams.name,
+                    op: .read,
+                    ttl: 300,
+                    toolName: nil,
+                    name: nameParams.name
+                )
+            }
         } catch {
             return WireResponse(
                 id: request.id,
@@ -95,9 +126,38 @@ public actor BrokerWireDispatcher {
         }
     }
 
+    // MARK: - Auth gate (CRIT-2)
+
+    /// Returns an authorization-denied WireResponse when peerUid ≠ ownerUid,
+    /// also emitting an audit row for the rejected attempt.
+    private func requireOwner(_ request: WireRequest, peerUid: UInt32) async -> WireResponse? {
+        guard peerUid == ownerUid else {
+            // Emit audit row for rejected mutation attempt (deny, no reason = write op rejection).
+            _ = try? await daemon.audit.append(.init(
+                ts: Date(),
+                tokenJti: "wire-\(request.method)-denied",
+                callerUid: Int32(bitPattern: peerUid),
+                callerTransport: .unix,
+                secretName: "(wire:\(request.method))",
+                op: .read,
+                allow: .deny,
+                reason: .scopePatternDenied,
+                llmTouched: false
+            ))
+            return WireResponse(id: request.id, error: WireError(
+                code: WireErrorCode.denied,
+                message: "Unauthorized: peerUid \(peerUid) != ownerUid \(ownerUid)"
+            ))
+        }
+        return nil
+    }
+
     // MARK: - secret.set (W3 — wired to BWClient.set)
 
     private func dispatchSecretSet(_ request: WireRequest, peerUid: UInt32) async -> WireResponse {
+        // CRIT-2: gate on owner identity before any mutation.
+        if let denied = await requireOwner(request, peerUid: peerUid) { return denied }
+
         struct SetParams: Decodable {
             let name: String
             let value: String
@@ -113,6 +173,18 @@ public actor BrokerWireDispatcher {
         }
         do {
             try await daemon.bwClient.set(name: params.name, value: params.value)
+            // CRIT-2: audit every mutation.
+            _ = try? await daemon.audit.append(.init(
+                ts: Date(),
+                tokenJti: "wire-set-\(UUID().uuidString.prefix(8))",
+                callerUid: Int32(bitPattern: peerUid),
+                callerTransport: .unix,
+                secretName: String(params.name.prefix(AuditWriter.maxSecretNameLength)),
+                op: .rotate,
+                allow: .allow,
+                reason: nil,
+                llmTouched: false
+            ))
             return WireResponse(id: request.id, result: .object(["ok": .bool(true)]))
         } catch {
             return WireResponse(id: request.id, error: WireError(
@@ -125,6 +197,9 @@ public actor BrokerWireDispatcher {
     // MARK: - secret.list (W3 — wired to BWClient.list)
 
     private func dispatchSecretList(_ request: WireRequest, peerUid: UInt32) async -> WireResponse {
+        // CRIT-2: gate on owner identity — listing is a read op but exposes all names.
+        if let denied = await requireOwner(request, peerUid: peerUid) { return denied }
+
         struct ListParams: Decodable {
             let filter: String?
         }
@@ -145,7 +220,44 @@ public actor BrokerWireDispatcher {
             } else {
                 filtered = names
             }
-            let items = filtered.map { JSONValue.string($0) }
+            // Bug 2 fix: return [VaultEntryRef] shaped objects instead of raw
+            // [String] names. ProductionBrokerClient.list() decodes [VaultEntryRef]
+            // — returning bare strings causes DecodingError.typeMismatch.
+            //
+            // Synthetic defaults for metadata fields not yet tracked by BWClient.list():
+            //   scope        = "default"
+            //   tier         = .warm
+            //   usageState   = .warm
+            //   lastRotated  = epoch (unknown — broker does not store rotation history yet)
+            //   rotationDue  = +7 days (warm tier baseline)
+            let now = Date()
+            let sevenDaysFromNow = now.addingTimeInterval(7 * 24 * 3600)
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .iso8601
+            let items: [JSONValue] = try filtered.map { name in
+                let ref = VaultEntryRef(
+                    name: name,
+                    scope: "default",
+                    tier: .warm,
+                    usageState: .warm,
+                    lastRotated: Date(timeIntervalSince1970: 0),
+                    rotationDue: sevenDaysFromNow
+                )
+                let data = try encoder.encode(ref)
+                return try JSONDecoder().decode(JSONValue.self, from: data)
+            }
+            // CRIT-2: audit list access.
+            _ = try? await daemon.audit.append(.init(
+                ts: Date(),
+                tokenJti: "wire-list-\(UUID().uuidString.prefix(8))",
+                callerUid: Int32(bitPattern: peerUid),
+                callerTransport: .unix,
+                secretName: "(list)",
+                op: .read,
+                allow: .allow,
+                reason: nil,
+                llmTouched: false
+            ))
             return WireResponse(id: request.id, result: .array(items))
         } catch {
             return WireResponse(id: request.id, error: WireError(
@@ -158,6 +270,9 @@ public actor BrokerWireDispatcher {
     // MARK: - secret.delete (W3 — wired to BWClient.delete)
 
     private func dispatchSecretDelete(_ request: WireRequest, peerUid: UInt32) async -> WireResponse {
+        // CRIT-2: gate on owner identity before any mutation.
+        if let denied = await requireOwner(request, peerUid: peerUid) { return denied }
+
         struct DeleteParams: Decodable {
             let name: String
         }
@@ -172,6 +287,18 @@ public actor BrokerWireDispatcher {
         }
         do {
             try await daemon.bwClient.delete(name: params.name)
+            // CRIT-2: audit every mutation.
+            _ = try? await daemon.audit.append(.init(
+                ts: Date(),
+                tokenJti: "wire-delete-\(UUID().uuidString.prefix(8))",
+                callerUid: Int32(bitPattern: peerUid),
+                callerTransport: .unix,
+                secretName: String(params.name.prefix(AuditWriter.maxSecretNameLength)),
+                op: .rotate,
+                allow: .allow,
+                reason: nil,
+                llmTouched: false
+            ))
             return WireResponse(id: request.id, result: .object(["ok": .bool(true)]))
         } catch {
             return WireResponse(id: request.id, error: WireError(
@@ -184,12 +311,28 @@ public actor BrokerWireDispatcher {
     // MARK: - Params
 
     /// Decoded params for `secret.get`.
+    ///
+    /// Bug 1 fix: `name` is the shorthand field emitted by
+    /// `ProductionBrokerClient.get(name:)` — `{name: "x"}`. When present
+    /// and the canonical fields (`sub`, `scope`, `op`, `ttl`) are absent, the
+    /// dispatcher fills in safe defaults (see `dispatchSecretGet`).
     private struct SecretGetParams: Decodable {
         let sub: String
         let scope: String
         let op: ShikkiSBT.Op
         let ttl: Int
         let toolName: String?
+        /// Shorthand name field (Shape B — client shorthand form).
+        let name: String?
+
+        init(sub: String, scope: String, op: ShikkiSBT.Op, ttl: Int, toolName: String?, name: String? = nil) {
+            self.sub = sub
+            self.scope = scope
+            self.op = op
+            self.ttl = ttl
+            self.toolName = toolName
+            self.name = name
+        }
     }
 
     /// Decode a typed params struct from a JSONValue tree by re-encoding

@@ -2,6 +2,9 @@ import Crypto
 import Foundation
 import Testing
 @testable import ShiSecretsKit
+#if canImport(Darwin)
+import Darwin
+#endif
 
 // ShiSecretsModule tests (Task 41 — BR-I-04).
 //
@@ -29,6 +32,43 @@ struct ShiSecretsModuleTests {
         #expect(scope.allowlist == ["ovh/*", "github.pat.*"])
         _ = try container.resolve(DriverRegistry.self)
         _ = try container.resolve(RotationEngine.self)
+    }
+
+    /// NEW-M2 regression: InMemoryCache registered by ShiSecretsModule must have
+    /// isRevoked wired to TokenRegistry. Revoke a JTI via the registry and verify
+    /// that a cache.get() for a matching entry returns nil (not the cached value).
+    @Test("NEW-M2: InMemoryCache registered via DI has isRevoked wired to TokenRegistry — revoked JTI evicted on cache hit")
+    func newM2_inMemoryCache_diRegistration_wiresTokenRegistryRevocation() async throws {
+        let container = DIContainer()
+        container.install(ShiSecretsModule())
+
+        let registry = try container.resolve(TokenRegistry.self)
+        let cache = try container.resolve(InMemoryCache.self)
+
+        // Insert a token row so we have a valid JTI to revoke.
+        let jti = "01HZZZZZZZZZZZZZZZZZZZZZZ1" // valid 26-char Crockford ULID shape
+        let row = TokenRegistry.Row(
+            jti: jti, sub: "test-sub", scope: "test/*",
+            op: .read, nbf: Date(), diesAt: Date().addingTimeInterval(3600),
+            llmTouched: false, passkeyPath: false
+        )
+        try await registry.insert(row)
+
+        // Cache a value with this JTI.
+        let uri = try ShiSecretURI.parse("shi-secret://prod/newm2-test")
+        let secretValue = InMemoryCache.SecretValue(plaintext: "sensitive", jti: jti)
+        await cache.set(uri, secretValue)
+
+        // Before revocation — cache must return the value.
+        let before = await cache.get(uri)
+        #expect(before != nil, "NEW-M2: cache should return value before JTI is revoked")
+
+        // Revoke the JTI in the TokenRegistry.
+        try await registry.revoke(jti: jti)
+
+        // After revocation — cache must return nil (evicted via isRevoked closure).
+        let after = await cache.get(uri)
+        #expect(after == nil, "NEW-M2: cache must evict entry when its JTI is revoked in the wired TokenRegistry")
     }
 
     @Test("BrokerSigningKey resolver refuses before Bootstrap unseal")

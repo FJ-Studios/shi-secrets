@@ -81,9 +81,14 @@ public enum DevModeSafety {
     public static let productionSocketPrefix = "/.shikki/run/"
 
     /// Validates the socket path is NOT a production location.
+    ///
+    /// HIGH-8: comparisons are lowercased + URL-standardized to prevent
+    /// case-sensitive bypass (e.g. /.SHIKKI/Run/).
     public static func assertSocketSafe(_ path: String) throws {
-        let absolute = (path as NSString).expandingTildeInPath
-        if absolute.contains(productionSocketPrefix) {
+        let absolute = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
+            .standardized.path.lowercased()
+        let prefix = productionSocketPrefix.lowercased()
+        if absolute.contains(prefix) {
             throw DevModeError.productionSocketPathRefused(path: absolute)
         }
         // Also refuse anything literally named secrets-brokerd.sock — be paranoid.

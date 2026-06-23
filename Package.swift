@@ -117,6 +117,8 @@ let package = Package(
                 "ShiSecretsBrokerd",
                 "ShiSecretsKit",
                 "ShiSecretsDrivers",
+                // Bug 3 fix tests: SecretsBrokerdCommand lives in ShiSecrets.
+                "ShiSecrets",
             ]
         ),
         .testTarget(

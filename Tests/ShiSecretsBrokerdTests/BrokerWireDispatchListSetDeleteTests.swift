@@ -14,17 +14,32 @@ import Glibc
 // / secret.delete dispatch paths (W3 phase).
 //
 // Gaps addressed:
-//   TCP-LD-01  secret.list returns .array of .string — wire shape correct
+//   TCP-LD-01  secret.list returns .array of VaultEntryRef objects — wire shape correct
 //   TCP-LD-02  secret.list on empty vault returns empty array
 //   TCP-LD-03  secret.set + secret.list round-trip — set entry appears in list
 //   TCP-LD-04  secret.delete idempotent (delete missing name does not error)
 //   TCP-LD-05  secret.set + secret.delete — list no longer contains deleted name
 //   TCP-LD-06  secret.list filter glob — prefix match only
 //
+// Bug 2 fix (v0.1.0): secret.list now returns [VaultEntryRef] objects (not bare
+// [String] names). Assertions updated to extract the `name` field from the object.
+//
 // All tests use InMemoryBWClient with no real Vaultwarden connection.
 
 @Suite("BrokerWireDispatch — list/set/delete")
 struct BrokerWireDispatchListSetDeleteTests {
+
+    // MARK: - Helper: extract entry names from [VaultEntryRef] wire response
+    //
+    // Bug 2 fix: secret.list now returns VaultEntryRef objects, not bare strings.
+    // Each item is a JSONValue.object with a "name" field.
+    private func entryNames(from items: [JSONValue]) -> [String] {
+        items.compactMap { item -> String? in
+            guard case .object(let obj) = item,
+                  case .string(let n) = obj["name"] else { return nil }
+            return n
+        }
+    }
 
     private func socketPath() -> String {
         "/tmp/sh-lsd-\(UUID().uuidString.prefix(8)).s"
@@ -73,20 +88,37 @@ struct BrokerWireDispatchListSetDeleteTests {
 
     // MARK: - secret.list
 
-    @Test("TCP-LD-01: secret.list — result is array (wire shape correct)")
+    @Test("TCP-LD-01: secret.list — result is array of VaultEntryRef objects (bug 2 fix)")
     func test_secretList_resultIsArray() async throws {
-        let (dispatcher, _, socket) = try await makeDaemonBridgeAndClient()
+        let (dispatcher, bwClient, socket) = try await makeDaemonBridgeAndClient()
         defer { Task { await socket.shutdown() } }
+
+        // Seed one entry so we can verify the shape of a non-empty result.
+        try await bwClient.set(name: "shape-test", value: "v")
 
         let request = WireRequest(method: "secret.list", params: nil, id: "ld-01")
         let response = await dispatcher.dispatch(request, peerUid: UInt32(geteuid()))
 
         #expect(response.id == "ld-01")
         #expect(response.error == nil, "secret.list must not error; got \(String(describing: response.error))")
-        guard case .array(_) = response.result! else {
+        guard case .array(let items) = response.result! else {
             Issue.record("result must be array; got \(String(describing: response.result))")
             return
         }
+        // Bug 2 fix: each item must be a VaultEntryRef object, not a bare string.
+        guard let first = items.first else {
+            Issue.record("expected at least one item in the seeded vault")
+            return
+        }
+        guard case .object(let obj) = first else {
+            Issue.record("Bug 2: list items must be VaultEntryRef objects, got \(first)")
+            return
+        }
+        // VaultEntryRef must carry at minimum: name, scope, tier, usage_state,
+        // last_rotated, rotation_due.
+        #expect(obj["name"] != nil, "VaultEntryRef must have 'name' field")
+        #expect(obj["scope"] != nil, "VaultEntryRef must have 'scope' field")
+        #expect(obj["tier"] != nil, "VaultEntryRef must have 'tier' field")
     }
 
     @Test("TCP-LD-02: secret.list on empty vault returns empty array")
@@ -126,9 +158,11 @@ struct BrokerWireDispatchListSetDeleteTests {
             Issue.record("list result must be array")
             return
         }
+        // Bug 2 fix: items are VaultEntryRef objects — extract names to check.
+        let names = entryNames(from: items)
         #expect(
-            items.contains(.string("ci-github-token")),
-            "list must contain 'ci-github-token' after set; got \(items)"
+            names.contains("ci-github-token"),
+            "list must contain 'ci-github-token' after set; got names=\(names)"
         )
     }
 
@@ -174,9 +208,11 @@ struct BrokerWireDispatchListSetDeleteTests {
             Issue.record("list result must be array")
             return
         }
+        // Bug 2 fix: items are VaultEntryRef objects — extract names to check.
+        let names = entryNames(from: items)
         #expect(
-            !items.contains(.string("ovh-dns-key")),
-            "deleted key must not appear in list; got \(items)"
+            !names.contains("ovh-dns-key"),
+            "deleted key must not appear in list; got names=\(names)"
         )
     }
 
@@ -205,13 +241,15 @@ struct BrokerWireDispatchListSetDeleteTests {
             Issue.record("list result must be array")
             return
         }
+        // Bug 2 fix: items are VaultEntryRef objects — extract names to check.
+        let names = entryNames(from: items)
         #expect(
-            items.contains(.string("ci-gh-token")) && items.contains(.string("ci-gh-app-key")),
-            "ci-* filter must return ci- prefixed entries; got \(items)"
+            names.contains("ci-gh-token") && names.contains("ci-gh-app-key"),
+            "ci-* filter must return ci- prefixed entries; got names=\(names)"
         )
         #expect(
-            !items.contains(.string("ovh-dns-key")),
-            "ci-* filter must NOT return ovh- entries; got \(items)"
+            !names.contains("ovh-dns-key"),
+            "ci-* filter must NOT return ovh- entries; got names=\(names)"
         )
     }
 }
