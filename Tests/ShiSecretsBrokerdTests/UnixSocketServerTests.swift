@@ -122,4 +122,55 @@ struct UnixSocketServerTests {
 
         #expect(!Foundation.FileManager.default.fileExists(atPath: path), "socket must be removed after shutdown")
     }
+
+    @Test("TCP-OSC-03: no prior socket file — bind succeeds on clean slate")
+    func test_socket_noPriorFile_startSucceeds() async throws {
+        let path = tempSocketPath()
+        // Verify clean slate (no prior file at path)
+        #expect(!Foundation.FileManager.default.fileExists(atPath: path), "precondition: no socket at path before start")
+
+        let config = UnixSocketConfig(socketPath: path, expectedMode: 0o600, expectedUid: UInt32(geteuid()))
+        let server = UnixSocketServer(config: config)
+
+        // start() must succeed on a clean path (baseline coverage alongside TCP-OSC-01)
+        try await server.start()
+
+        var st = stat()
+        #expect(stat(path, &st) == 0, "socket file must exist after start")
+        #expect(UInt16(st.st_mode) & 0o777 == 0o600, "mode must be 0600")
+
+        await server.shutdown()
+        #expect(!Foundation.FileManager.default.fileExists(atPath: path), "socket file must be removed after shutdown")
+    }
+
+    @Test("TCP-OSC-04: sequential start → shutdown → start is idempotent (post-fix recurrence guard)")
+    func test_socket_sequentialRestartIsIdempotent() async throws {
+        // Codifies the fix for session b5f03eef recurrence: a second start() after
+        // shutdown() must not trip EADDRINUSE from the just-removed socket file.
+        // See [[brokerd-recovery-full-procedure-2026-06-23]] Stage 4.
+        let path = tempSocketPath()
+        let config = UnixSocketConfig(socketPath: path, expectedMode: 0o600, expectedUid: UInt32(geteuid()))
+
+        // First boot
+        let server = UnixSocketServer(config: config)
+        try await server.start()
+        #expect(Foundation.FileManager.default.fileExists(atPath: path), "socket must exist after first start")
+        await server.shutdown()
+        #expect(!Foundation.FileManager.default.fileExists(atPath: path), "socket must be gone after shutdown")
+
+        // Second boot (simulates launchctl kickstart after a crash/rebuild)
+        let server2 = UnixSocketServer(config: config)
+        do {
+            try await server2.start()
+        } catch {
+            Issue.record("Second start() must succeed after clean shutdown; got \(error)")
+            return
+        }
+
+        var st = stat()
+        #expect(stat(path, &st) == 0, "socket must exist after second start")
+        #expect(UInt16(st.st_mode) & 0o777 == 0o600, "mode must be 0600 on second start")
+
+        await server2.shutdown()
+    }
 }
