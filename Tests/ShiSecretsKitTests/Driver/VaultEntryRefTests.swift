@@ -5,15 +5,15 @@ import Testing
 // VaultEntryRef + HumanRunbook tests (Task 11 — BR-B-01).
 // Shape-only — full vault I/O lives in Waves 3+ (BWClient driver bridge).
 //
-// W2 additions: flexible date decoding tests (fix/secrets-list-last-rotated-iso8601-decode)
-// T1 — ISO 8601 string parses correctly
-// T2 — Unix epoch Double parses correctly
-// T3 — null/missing last_rotated is graceful (no error, distantPast default)
+// W0 update: flexible date decoding REMOVED per operator mandate 2026-06-24.
+// ISO 8601 RFC 3339 UTC is the ONLY valid wire format for date fields.
+// Double/null/missing inputs now throw — see BrokerWireDateFormatTests.swift
+// for the full 6-test regression suite (T-W0-01 through T-W0-06).
 
 @Suite("VaultEntryRef")
 struct VaultEntryRefTests {
 
-    // MARK: - W2: Flexible date decoding (fix for ISO 8601 schema drift)
+    // MARK: - W0: ISO 8601-only date decoding (single SoT per operator mandate)
 
     @Test("T1: last_rotated as ISO 8601 string decodes correctly")
     func lastRotatedISO8601String() throws {
@@ -28,7 +28,9 @@ struct VaultEntryRefTests {
         }
         """.data(using: .utf8)!
 
-        let entry = try JSONDecoder().decode(VaultEntryRef.self, from: json)
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let entry = try decoder.decode(VaultEntryRef.self, from: json)
 
         // Verify the parsed date matches the ISO 8601 value exactly
         var cal = Calendar(identifier: .gregorian)
@@ -40,62 +42,6 @@ struct VaultEntryRefTests {
         #expect(components.hour == 18)
         #expect(components.minute == 0)
         #expect(components.second == 0)
-    }
-
-    @Test("T2: last_rotated as Unix epoch Double decodes correctly")
-    func lastRotatedUnixDouble() throws {
-        // 1_735_000_000 = 2024-12-24T01:26:40Z
-        let json = """
-        {
-            "name": "brevo:api",
-            "scope": "brevo.api.send",
-            "tier": "warm",
-            "usage_state": "warm",
-            "last_rotated": 1735000000,
-            "rotation_due": 1735604800
-        }
-        """.data(using: .utf8)!
-
-        let entry = try JSONDecoder().decode(VaultEntryRef.self, from: json)
-
-        let expectedDate = Date(timeIntervalSince1970: 1_735_000_000)
-        #expect(entry.lastRotated == expectedDate)
-    }
-
-    @Test("T3: null last_rotated is graceful — no error, distantPast default")
-    func lastRotatedNullGraceful() throws {
-        let json = """
-        {
-            "name": "gh:token",
-            "scope": "github.repo.read",
-            "tier": "cool",
-            "usage_state": "cool",
-            "last_rotated": null,
-            "rotation_due": null
-        }
-        """.data(using: .utf8)!
-
-        // Must not throw — null fields should default to distantPast
-        let entry = try JSONDecoder().decode(VaultEntryRef.self, from: json)
-        #expect(entry.lastRotated == Date.distantPast)
-        #expect(entry.rotationDue == Date.distantPast)
-    }
-
-    @Test("T4: missing last_rotated key is graceful — no error, distantPast default")
-    func lastRotatedMissingGraceful() throws {
-        let json = """
-        {
-            "name": "gh:token",
-            "scope": "github.repo.read",
-            "tier": "cool",
-            "usage_state": "cool"
-        }
-        """.data(using: .utf8)!
-
-        // Must not throw — missing keys default to distantPast
-        let entry = try JSONDecoder().decode(VaultEntryRef.self, from: json)
-        #expect(entry.lastRotated == Date.distantPast)
-        #expect(entry.rotationDue == Date.distantPast)
     }
 
 

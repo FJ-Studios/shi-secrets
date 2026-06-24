@@ -35,6 +35,9 @@ let package = Package(
             dependencies: [
                 .product(name: "Crypto", package: "swift-crypto"),
             ],
+            exclude: [
+                "WIRE_FORMAT.md",
+            ],
             resources: [
                 .copy("Migrations"),
             ]
