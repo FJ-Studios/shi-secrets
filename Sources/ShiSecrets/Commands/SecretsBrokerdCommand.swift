@@ -10,11 +10,14 @@
 //             If the binary is missing, surface "binary missing — reinstall via
 //             `shi pickup shi-secrets`" and exit 1.
 //   stop   — `launchctl unload -w <plist>`
-//   status — `launchctl list eu.fj-studios.shikki.secrets-brokerd`
+//   status — `launchctl list io.shikki.secrets-brokerd`
+//
+// Canonical label: io.shikki.secrets-brokerd (product domain, operator mandate 2026-06-24).
+// Supersedes: eu.fj-studios.shikki.secrets-brokerd (deprecated org-namespace label).
 //
 // The plist path is:
-//   ~/Library/LaunchAgents/eu.fj-studios.shikki.secrets-brokerd.plist   (macOS)
-//   ~/.config/systemd/user/shikki-secrets-brokerd.service               (Linux)
+//   ~/.shikki/LaunchAgents/io.shikki.secrets-brokerd.plist   (macOS, W3 canonical)
+//   ~/.config/systemd/user/shikki-secrets-brokerd.service    (Linux)
 //
 // NEVER call `swift build` — that is a dev-pipeline concern. The pre-built
 // binary is installed by `shi pickup shi-secrets` into ~/.shikki/bin/.
@@ -36,10 +39,12 @@ public struct SecretsBrokerdCommand {
     }
 
     private var plistPath: String {
-        "\(NSHomeDirectory())/Library/LaunchAgents/eu.fj-studios.shikki.secrets-brokerd.plist"
+        // W3 mandate 2026-06-24: canonical plist is now at ~/.shikki/LaunchAgents/ (not ~/Library/LaunchAgents/).
+        // Label: io.shikki.secrets-brokerd (product domain). Supersedes eu.fj-studios.shikki.secrets-brokerd.
+        "\(NSHomeDirectory())/.shikki/LaunchAgents/io.shikki.secrets-brokerd.plist"
     }
 
-    private static let plistLabel = "eu.fj-studios.shikki.secrets-brokerd"
+    private static let plistLabel = "io.shikki.secrets-brokerd"
 
     // MARK: - run()
 

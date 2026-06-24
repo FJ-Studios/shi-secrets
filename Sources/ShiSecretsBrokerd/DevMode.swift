@@ -101,8 +101,8 @@ public enum DevModeSafety {
     ///
     /// XPC_SERVICE_NAME detection: XCTest sets this to "0" (sentinel), real
     /// launchd-issued services use a reverse-DNS bundle id (contains a dot,
-    /// e.g. `eu.fj-studios.shikki.secrets-brokerd`). Refuse only on the
-    /// reverse-DNS pattern.
+    /// e.g. `io.shikki.secrets-brokerd`). Refuse only on the reverse-DNS pattern.
+    /// Note: canonical label is io.shikki.secrets-brokerd (W3 mandate 2026-06-24).
     public static func assertEnvSafe(env: [String: String]) throws {
         if let xpc = env["XPC_SERVICE_NAME"], xpc.contains(".") {
             throw DevModeError.launchdLaunchRefused(xpcService: xpc)
