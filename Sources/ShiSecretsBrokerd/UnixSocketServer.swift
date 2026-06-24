@@ -123,7 +123,10 @@ public actor UnixSocketServer {
 
     /// Bind + chmod + chown + fstat verify. Throws on any mismatch.
     public func start() throws {
-        // Remove a stale socket file so bind() doesn't trip EADDRINUSE.
+        // Unlink stale socket from prior boot — per recurrence in session b5f03eef
+        // (sessions 2026-06-23 and 2026-06-24). See [[brokerd-recovery-full-procedure]] Stage 4.
+        // AF_UNIX bind() returns EADDRINUSE if the path exists, even from a killed prior process.
+        // Unconditional unlink is safe: socket files are runtime state, not config.
         _ = unlink(config.socketPath)
 
         let sock = socket(AF_UNIX, sockStream, 0)
