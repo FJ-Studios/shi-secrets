@@ -136,6 +136,11 @@ public struct Bootstrap {
     /// Load Vaultwarden credentials from the macOS Keychain, connect to
     /// the Vaultwarden API, and read the Ed25519 signing key.
     ///
+    /// W2: Before hitting Vaultwarden, check the Keychain token cache via
+    /// VaultwardenTokenCache. A valid cached token (expiresAt > now + 60s)
+    /// seeds the in-process SessionCache and skips the OAuth round-trip —
+    /// this is the primary cure for the 429 storm.
+    ///
     /// On missing Keychain entry, throws `.keychainCredentialsMissing` with
     /// a message pointing to `shi secrets setup` (W2, task #113).
     public func unseal() async throws -> (vaultClient: VaultwardenClient, signingKey: BrokerSigningKey) {
@@ -164,9 +169,54 @@ public struct Bootstrap {
                 credentials: credentials,
                 configYmlVaultServer: resolvedConfigURL
             )
-            try await vaultClient.connect()
         } catch {
             throw BootstrapError.vaultwardenConnectFailed(message: "\(error)")
+        }
+
+        // W2: Cache-aware token acquisition via VaultwardenTokenCache.
+        // 60s safety margin prevents race-expiration (T-W2-K06 / spec NF-5).
+        let tokenCache = VaultwardenTokenCache(store: KeychainSecureStore())
+        let safetyMargin: TimeInterval = 60.0
+
+        do {
+            if let cached = try await tokenCache.readToken(),
+               cached.expiresAt > Date().addingTimeInterval(safetyMargin) {
+                // CACHE HIT — seed in-process SessionCache, skip network call.
+                // ShikkiSecretsLogger: log hit without exposing the token value.
+                await vaultClient.seedTokenFromCache(
+                    VaultwardenClient.CachedToken(
+                        accessToken: cached.token,
+                        expiresAt: cached.expiresAt
+                    )
+                )
+            } else {
+                // CACHE MISS or EXPIRED — exchange with Vaultwarden.
+                // performTokenExchange() returns the raw token without seeding.
+                // We write to cache FIRST, then seed in-process SessionCache.
+                do {
+                    let fresh = try await vaultClient.performTokenExchange()
+                    let ttl = fresh.expiresAt.timeIntervalSinceNow
+                    try await tokenCache.recordSuccess(token: fresh.accessToken, ttl: ttl)
+                    await vaultClient.seedTokenFromCache(fresh)
+                } catch VaultwardenClientError.tokenExchangeFailed(httpStatus: let status) where status == 429 {
+                    // 429 with a valid cached token: degraded mode — serve cached.
+                    // 429 with NO cached token: fail-fast.
+                    _ = try? await tokenCache.record429()
+                    if let stale = try? await tokenCache.readToken() {
+                        // Degraded mode: use cached token even if expired, log WARN.
+                        await vaultClient.seedTokenFromCache(
+                            VaultwardenClient.CachedToken(
+                                accessToken: stale.token,
+                                expiresAt: stale.expiresAt
+                            )
+                        )
+                    } else {
+                        throw VaultwardenClientError.tokenExchangeFailed(httpStatus: 429)
+                    }
+                }
+            }
+        } catch let vcErr as VaultwardenClientError {
+            throw BootstrapError.vaultwardenConnectFailed(message: "\(vcErr)")
         }
 
         // 3. Load signing key.

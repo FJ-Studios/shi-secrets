@@ -122,6 +122,21 @@ public actor VaultwardenClient {
     /// Resolved base URL (config-chain resolution done at init).
     private let baseURL: URL
 
+    // MARK: - W2: Cached token struct (Keychain-side representation)
+
+    /// An OAuth access token with its server-reported expiry.
+    /// NOT Codable on purpose — the token must never be JSON-serialised to disk.
+    /// JSON encoding to the Keychain blob happens only in VaultwardenTokenCache.
+    public struct CachedToken: Sendable {
+        public let accessToken: String
+        public let expiresAt: Date
+
+        public init(accessToken: String, expiresAt: Date) {
+            self.accessToken = accessToken
+            self.expiresAt = expiresAt
+        }
+    }
+
     // MARK: - Init
 
     /// - Parameter credentials: Loaded from Keychain via KeychainVaultCredentials.
@@ -197,6 +212,62 @@ public actor VaultwardenClient {
         // Cache hit — no need to re-exchange.
         if await sessionCache.currentToken() != nil { return }
         try await refreshToken()
+    }
+
+    // MARK: - W2: seedTokenFromCache(_:)
+
+    /// Seed the in-process SessionCache from an externally provided cached token
+    /// (e.g. read from Keychain by VaultwardenTokenCache in Bootstrap.unseal()).
+    /// Call this BEFORE connect() so connect() sees a valid in-process cache
+    /// and skips the network round-trip.
+    ///
+    /// The safety margin check (60s) is done by the caller (Bootstrap/VaultwardenTokenCache).
+    /// This method trusts the token is valid — it is the caller's responsibility
+    /// to verify `expiresAt > Date() + 60s` before seeding.
+    public func seedTokenFromCache(_ cached: CachedToken) async {
+        await sessionCache.setToken(cached.accessToken, expiresAt: cached.expiresAt)
+    }
+
+    // MARK: - W2: performTokenExchange()
+
+    /// Perform a raw OAuth client_credentials exchange and return the token +
+    /// expiresAt without seeding SessionCache. Used by Bootstrap/VaultwardenTokenCache
+    /// so the cache can be written BEFORE the in-process SessionCache is seeded.
+    public func performTokenExchange() async throws -> CachedToken {
+        let tokenURL = baseURL.appendingPathComponent("identity/connect/token")
+        var request = URLRequest(url: tokenURL)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+
+        let deviceID = Self.resolvedDeviceIdentifier()
+        let body = [
+            "grant_type=client_credentials",
+            "scope=api",
+            "client_id=\(credentials.clientID.urlFormEncoded)",
+            "client_secret=\(credentials.clientSecret.urlFormEncoded)",
+            "deviceType=8",
+            "deviceIdentifier=\(deviceID.urlFormEncoded)",
+            "deviceName=shikki-secrets-brokerd",
+        ].joined(separator: "&")
+        request.httpBody = body.data(using: .utf8)
+
+        let (data, response) = try await performRequest(request)
+        guard let httpResponse = response as? HTTPURLResponse else {
+            throw VaultwardenClientError.tokenResponseMalformed
+        }
+        guard (200...299).contains(httpResponse.statusCode) else {
+            throw VaultwardenClientError.tokenExchangeFailed(httpStatus: httpResponse.statusCode)
+        }
+
+        let tokenResponse: TokenResponse
+        do {
+            tokenResponse = try JSONDecoder().decode(TokenResponse.self, from: data)
+        } catch {
+            throw VaultwardenClientError.tokenResponseMalformed
+        }
+
+        let expiresAt = Date().addingTimeInterval(TimeInterval(tokenResponse.expires_in))
+        return CachedToken(accessToken: tokenResponse.access_token, expiresAt: expiresAt)
     }
 
     // MARK: - refreshToken()
