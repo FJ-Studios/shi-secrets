@@ -371,6 +371,84 @@ struct UnixSocketServerAcceptLoopTests {
         loopTask.cancel()
     }
 
+    // T-09 (Idempotent shutdown — R-1 regression guard): calling
+    // requestShutdownAndInterrupt() twice must NOT close a recycled fd.
+    //
+    // The R-1 hazard (panel-rework W1): _listenFdForInterrupt is not cleared after
+    // the first call, so a second call fires close() on whatever fd number the OS
+    // recycled — silently corrupting an unrelated resource.
+    //
+    // Detection strategy: after the first requestShutdownAndInterrupt() closes the
+    // listen fd, we open a pipe() to grab that fd slot. A sentinel byte is written
+    // through the write end. Then we call requestShutdownAndInterrupt() a second time.
+    //   - Without the R-1 fix: the second close() kills the pipe read end → read
+    //     returns -1 (EBADF) and the sentinel byte is gone.
+    //   - After the fix:       second call is a no-op → read returns 1 (sentinel intact).
+    @Test("requestShutdownAndInterrupt() is idempotent — second call must NOT close a reused fd (R-1)")
+    func test_requestShutdownAndInterrupt_isIdempotent() async throws {
+        let path = "/tmp/sh-idem-\(UUID().uuidString.prefix(8)).s"
+        let config = UnixSocketConfig(socketPath: path, expectedMode: 0o600, expectedUid: UInt32(geteuid()))
+        let server = UnixSocketServer(config: config)
+        try await server.start()
+
+        actor LoopDone { var done = false; func mark() { done = true } }
+        let loopDone = LoopDone()
+
+        let loopTask = Task.detached {
+            await server.runAcceptLoop { _, _ in
+                WireResponse(id: nil, result: .null)
+            }
+            await loopDone.mark()
+        }
+
+        // Yield briefly so accept() is actually blocking.
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        // First call — wakes accept loop (listen fd closed → accept() returns EBADF).
+        server.requestShutdownAndInterrupt()
+
+        // Wait for the loop to exit.
+        try await Task.sleep(nanoseconds: 200_000_000)
+        let exitedAfterFirst = await loopDone.done
+        #expect(exitedAfterFirst, "accept loop must exit after first requestShutdownAndInterrupt()")
+
+        // Open a pipe to grab whatever fd number was just freed by the first close().
+        var pipeEnds: [Int32] = [-1, -1]
+        let pipeRc = pipeEnds.withUnsafeMutableBufferPointer { ptr -> Int32 in
+            pipe(ptr.baseAddress!)
+        }
+        guard pipeRc == 0 else {
+            Issue.record("could not open pipe for R-1 fd-reuse detection")
+            loopTask.cancel()
+            return
+        }
+        let pipeReadFd = pipeEnds[0]
+        let pipeWriteFd = pipeEnds[1]
+        defer { close(pipeWriteFd) }
+
+        // Write a sentinel byte through the write end before the second interrupt.
+        var sentinel: UInt8 = 0xAB
+        _ = withUnsafePointer(to: &sentinel) { ptr in
+            write(pipeWriteFd, ptr, 1)
+        }
+
+        // Second call — must be a no-op.
+        // Without the R-1 fix: closes pipeReadFd → subsequent read returns EBADF.
+        // With the fix:        _listenFdForInterrupt == -1, no close() fires.
+        server.requestShutdownAndInterrupt()
+
+        var readByte: UInt8 = 0
+        let n = read(pipeReadFd, &readByte, 1)
+        close(pipeReadFd)
+
+        // R-1 assertion: n must be 1 and the byte must be intact.
+        #expect(n == 1, "R-1: second requestShutdownAndInterrupt() must NOT close a reused fd; read returned \(n)")
+        #expect(readByte == 0xAB, "R-1: sentinel byte must survive; got 0x\(String(readByte, radix: 16))")
+
+        loopTask.cancel()
+        try await Task.sleep(nanoseconds: 50_000_000)
+    }
+
     // T-08 (ECONNABORTED is transient): verify that an ECONNABORTED-equivalent
     // reset-before-accept does NOT cause the loop to exit.
     //

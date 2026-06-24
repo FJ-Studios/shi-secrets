@@ -127,6 +127,11 @@ public actor UnixSocketServer {
     // shutdown), and read nonisolated only for the one-shot close in
     // requestShutdownAndInterrupt(). The write to -1 in shutdown() happens under
     // actor isolation, so it cannot race with the nonisolated read.
+    //
+    // R-1 fix: _listenFdForInterrupt is cleared to -1 atomically inside
+    // requestShutdownAndInterrupt() via OSAtomicCompareAndSwap32 (or equivalent),
+    // ensuring a second call is a no-op and cannot close a recycled fd.
+    // See [[panel-rework-R1-double-close-fix-2026-06-24]].
     nonisolated(unsafe) private var _listenFdForInterrupt: Int32 = -1
 
     public init(config: UnixSocketConfig) {
@@ -275,18 +280,33 @@ public actor UnixSocketServer {
     /// eventually reconciled by the next actor-isolated call (or stays stale
     /// if the actor is discarded after shutdown, which is fine — the fd is closed).
     ///
-    /// Used by: tests (T-06/T-07/T-08), and future Phase 0.2 signal handler.
+    /// Used by: tests (T-06/T-07/T-08/T-09), and future Phase 0.2 signal handler.
     /// Production Main.swift uses the signal → watchTask → shutdown() path,
     /// which works because the signal arrives AFTER accept() returns for each
     /// connection (i.e. there IS a connection to wake the loop).
     ///
     /// For the idle-daemon case (no connections arrive, the loop is permanently
     /// blocked in accept()), this is the ONLY correct teardown path.
+    ///
+    /// R-1 fix (panel-rework W1): the swap from snapFd → -1 is done via
+    /// OSAtomicCompareAndSwap32Barrier so a concurrent or repeated call cannot
+    /// close the same fd twice. Without this guard, a second call would close
+    /// whatever fd number the OS recycled after the first close(), silently
+    /// corrupting an unrelated resource. The swap also prevents the TOCTOU
+    /// window where shutdown() writes -1 and requestShutdownAndInterrupt()
+    /// races to close the just-freed fd value before the -1 lands.
     public nonisolated func requestShutdownAndInterrupt() {
-        let snapFd = _listenFdForInterrupt
-        if snapFd >= 0 {
-            close(snapFd)
-        }
+        // Atomically swap _listenFdForInterrupt to -1, capturing the old value.
+        // If the old value is already -1 (already shut down), this is a no-op.
+        // OSAtomicCompareAndSwap32Barrier provides the full memory barrier needed
+        // for safe nonisolated access alongside actor-isolated writes in start()
+        // and shutdown().
+        var snapFd: Int32
+        repeat {
+            snapFd = _listenFdForInterrupt
+            if snapFd < 0 { return }   // Already shut down — no-op.
+        } while !OSAtomicCompareAndSwap32Barrier(snapFd, -1, &_listenFdForInterrupt)
+        close(snapFd)
         _ = unlink(config.socketPath)
     }
 
@@ -394,8 +414,9 @@ public actor UnixSocketServer {
                 // Signal interrupt — always retry, never fatal.
                 if e == EINTR { continue }
                 // Transient kernel conditions — the listen socket remains valid.
-                // EAGAIN/EWOULDBLOCK: kernel not ready (rare on blocking sockets, but
-                //   observed under scheduler pressure on Darwin).
+                // EAGAIN/EWOULDBLOCK: rare-but-spec-legal on a blocking accept(2) per
+                //   POSIX §accept (the standard explicitly lists EAGAIN/EWOULDBLOCK as
+                //   permitted return values even for blocking sockets). Retry is correct.
                 // ECONNABORTED: peer reset before accept() ran — socket still healthy.
                 if e == EAGAIN || e == EWOULDBLOCK || e == ECONNABORTED { continue }
                 // Any other errno is unexpected (EMFILE=fd limit, ENFILE=system limit,
