@@ -7,7 +7,7 @@
     <key>CFBundleName</key>
     <string>shikki-secrets-brokerd</string>
     <key>CFBundleIdentifier</key>
-    <string>eu.fj-studios.shikki.secrets-brokerd</string>
+    <string>io.shikki.secrets-brokerd</string>
     <key>CFBundleVersion</key>
     <string>1</string>
     <key>CFBundleShortVersionString</key>

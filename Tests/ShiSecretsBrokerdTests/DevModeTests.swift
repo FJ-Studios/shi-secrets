@@ -92,7 +92,10 @@ final class DevModeTests: XCTestCase {
     // MARK: - T7: launchd refusal
 
     func test_T7_refuses_when_xpc_service_name_is_reverse_dns() {
-        XCTAssertThrowsError(try DevModeSafety.assertEnvSafe(env: ["XPC_SERVICE_NAME": "eu.fj-studios.shikki.secrets-brokerd"])) { err in
+        // W3 mandate 2026-06-24: canonical label is io.shikki.secrets-brokerd.
+        // The old eu.fj-studios.shikki.secrets-brokerd label also triggers refusal (contains dot).
+        // Both are valid reverse-DNS patterns that launchd uses for XPC_SERVICE_NAME.
+        XCTAssertThrowsError(try DevModeSafety.assertEnvSafe(env: ["XPC_SERVICE_NAME": "io.shikki.secrets-brokerd"])) { err in
             guard case DevModeError.launchdLaunchRefused = err else {
                 return XCTFail("expected launchdLaunchRefused, got \(err)")
             }
