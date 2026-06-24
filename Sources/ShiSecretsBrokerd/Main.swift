@@ -192,11 +192,16 @@ struct BrokerMain {
         signal(SIGTERM, signalHandler)
         signal(SIGINT,  signalHandler)
 
-        // Spawn the shutdown watcher. When triggered, close the listen fd
-        // so accept() returns EBADF and runAcceptLoop exits cleanly.
+        // Spawn the shutdown watcher. When triggered, interrupt accept() and
+        // remove the socket file. Uses the nonisolated requestShutdownAndInterrupt()
+        // instead of actor-isolated shutdown() because the daemon may be blocked
+        // inside accept(2) when the signal arrives — shutdown() would deadlock
+        // waiting for the actor to become free. After the interrupt, accept()
+        // returns EBADF and runAcceptLoop exits, releasing the actor, at which
+        // point the process terminates.
         let watchTask = Task.detached {
             await shutdownCoordinator.waitForShutdown()
-            await socket.shutdown()
+            socket.requestShutdownAndInterrupt()
         }
 
         // ── 5. Accept loop — runs forever until shutdown ───────────────────

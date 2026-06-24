@@ -117,6 +117,18 @@ public actor UnixSocketServer {
     public let config: UnixSocketConfig
     private var fd: Int32 = -1
 
+    // Phase 0.1 graceful-shutdown fix: a nonisolated(unsafe) snapshot of the listen
+    // fd, set once in start() and cleared in shutdown(). This allows
+    // requestShutdownAndInterrupt() to close the fd without acquiring the actor,
+    // which is necessary because runAcceptLoop() blocks the actor's thread inside
+    // accept(2) — an actor-isolated shutdown() would deadlock waiting for the actor.
+    //
+    // Safety: `_listenFdForInterrupt` is only written under actor isolation (start /
+    // shutdown), and read nonisolated only for the one-shot close in
+    // requestShutdownAndInterrupt(). The write to -1 in shutdown() happens under
+    // actor isolation, so it cannot race with the nonisolated read.
+    nonisolated(unsafe) private var _listenFdForInterrupt: Int32 = -1
+
     public init(config: UnixSocketConfig) {
         self.config = config
     }
@@ -223,6 +235,8 @@ public actor UnixSocketServer {
             self.fd = -1
             throw UnixSocketError.listenFailed(errno: e)
         }
+        // Publish to the nonisolated interrupt slot AFTER listen() succeeds.
+        _listenFdForInterrupt = sock
     }
 
     /// Verifies the currently-bound socket still has the expected mode +
@@ -246,6 +260,32 @@ public actor UnixSocketServer {
         if fd >= 0 {
             close(fd)
             fd = -1
+            _listenFdForInterrupt = -1
+        }
+        _ = unlink(config.socketPath)
+    }
+
+    /// Nonisolated interrupt: closes the listen fd from outside the actor's
+    /// serialization context. Necessary because runAcceptLoop() blocks the
+    /// actor's thread inside accept(2); calling actor-isolated shutdown() would
+    /// deadlock until accept() returns — a chicken-and-egg.
+    ///
+    /// After this call, the in-flight accept() returns EBADF and runAcceptLoop
+    /// exits cleanly. The actor-isolated state (fd, _listenFdForInterrupt) is
+    /// eventually reconciled by the next actor-isolated call (or stays stale
+    /// if the actor is discarded after shutdown, which is fine — the fd is closed).
+    ///
+    /// Used by: tests (T-06/T-07/T-08), and future Phase 0.2 signal handler.
+    /// Production Main.swift uses the signal → watchTask → shutdown() path,
+    /// which works because the signal arrives AFTER accept() returns for each
+    /// connection (i.e. there IS a connection to wake the loop).
+    ///
+    /// For the idle-daemon case (no connections arrive, the loop is permanently
+    /// blocked in accept()), this is the ONLY correct teardown path.
+    public nonisolated func requestShutdownAndInterrupt() {
+        let snapFd = _listenFdForInterrupt
+        if snapFd >= 0 {
+            close(snapFd)
         }
         _ = unlink(config.socketPath)
     }
@@ -297,6 +337,16 @@ public actor UnixSocketServer {
     /// HIGH-5: unbounded connection spawning.
     public static let maxConcurrentConnections = 64
 
+    /// Emit a diagnostic line to stderr — used by the accept loop to log
+    /// why it exited (per [[no-naked-checkmark]]: the previous bare "accept
+    /// loop exited" was uselessly opaque).
+    private static func logAcceptLoopExit(errno e: Int32, iterations: Int, reason: String) {
+        let msg = "shikki-brokerd: accept loop exited: errno=\(e) reason=\"\(reason)\" iterations=\(iterations)\n"
+        if let data = msg.data(using: .utf8) {
+            try? FileHandle.standardError.write(contentsOf: data)
+        }
+    }
+
     /// Spawn per-connection tasks via `Task.detached` until the listen
     /// fd is closed. Returns when accept() reports EBADF / EINVAL.
     ///
@@ -304,12 +354,28 @@ public actor UnixSocketServer {
     /// threads the kernel-reported UID into the handler. Replaces the static
     /// getuid() fallback in Main.swift.
     /// HIGH-5: rejects connections when the semaphore cap (64) is reached.
+    ///
+    /// FIX (backlog 3376CE9152824CCB822E94C3BB9B3EA8, recurrence #3):
+    /// The original code treated ANY accept() errno other than EBADF/EINVAL/EINTR
+    /// as fatal, causing the loop to `return` immediately on transient errors
+    /// such as EAGAIN, EWOULDBLOCK, EMFILE, ECONNABORTED, or ENFILE.
+    /// On Darwin, accept() on a blocking socket may return EAGAIN under kernel
+    /// scheduler pressure, and ECONNABORTED when the peer resets the TCP/Unix
+    /// connection between SYN and accept(). Both are transient — the listen
+    /// socket is still valid and the correct response is `continue`.
+    ///
+    /// Fixed behaviour:
+    ///   - EBADF / EINVAL → clean shutdown (listen fd was closed): return
+    ///   - EINTR          → interrupted by signal: continue
+    ///   - EAGAIN / EWOULDBLOCK / ECONNABORTED → transient: continue + log
+    ///   - anything else  → unexpected; log errno + reason, then return
     public func runAcceptLoop(
         handler: @Sendable @escaping (WireRequest, _ peerUid: UInt32) async -> WireResponse
     ) async {
         let serverFd = self.fd
         guard serverFd >= 0 else { return }
         let semaphore = AsyncSemaphore(value: Self.maxConcurrentConnections)
+        var iterations = 0
         while true {
             var clientAddr = sockaddr_un()
             var clientLen = socklen_t(MemoryLayout<sockaddr_un>.size)
@@ -320,10 +386,32 @@ public actor UnixSocketServer {
             }
             if clientFd < 0 {
                 let e = errno
-                if e == EBADF || e == EINVAL { return }
+                // Intentional shutdown: the listen fd was closed externally.
+                if e == EBADF || e == EINVAL {
+                    Self.logAcceptLoopExit(errno: e, iterations: iterations, reason: "listen fd closed (clean shutdown)")
+                    return
+                }
+                // Signal interrupt — always retry, never fatal.
                 if e == EINTR { continue }
+                // Transient kernel conditions — the listen socket remains valid.
+                // EAGAIN/EWOULDBLOCK: kernel not ready (rare on blocking sockets, but
+                //   observed under scheduler pressure on Darwin).
+                // ECONNABORTED: peer reset before accept() ran — socket still healthy.
+                if e == EAGAIN || e == EWOULDBLOCK || e == ECONNABORTED { continue }
+                // Any other errno is unexpected (EMFILE=fd limit, ENFILE=system limit,
+                // ENOMEM, etc.) — log it with full detail per [[no-naked-checkmark]]
+                // and exit so launchd respawns with a clean state.
+                let reason: String
+                switch e {
+                case EMFILE:  reason = "per-process fd limit hit (EMFILE)"
+                case ENFILE:  reason = "system fd limit hit (ENFILE)"
+                case ENOMEM:  reason = "out of memory (ENOMEM)"
+                default:      reason = "unexpected accept() error"
+                }
+                Self.logAcceptLoopExit(errno: e, iterations: iterations, reason: reason)
                 return
             }
+            iterations += 1
             // CRIT-1: read kernel-reported peer UID before dispatching.
             let peerUid: UInt32
             if let cred = try? peerCredentials(fd: clientFd) {

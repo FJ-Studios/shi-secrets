@@ -234,4 +234,258 @@ struct UnixSocketServerAcceptLoopTests {
             group.cancelAll()
         }
     }
+
+    // =========================================================================
+    // Tests for accept-loop spurious-exit fix (backlog 3376CE9152824CCB822E94C3BB9B3EA8)
+    // =========================================================================
+
+    // T-06 (Persistence test): accept loop survives 5s of idle — loop is still
+    // alive after no connections have arrived.
+    //
+    // Strategy: start a real bound server + runAcceptLoop in a detached Task.
+    // Wait 5s with no connections. Then call requestShutdownAndInterrupt() (the
+    // nonisolated interrupt that closes the fd from outside the actor, causing
+    // accept() to return EBADF) and verify the loop task completes — i.e. it
+    // had not self-terminated before our shutdown signal.
+    //
+    // Rationale: if the bug were present, the loop would exit immediately after
+    // startup (0 iterations) and the loopTask would complete well before the
+    // 5s window. We distinguish "clean shutdown" from "spurious exit" by
+    // checking the loop was NOT done before we called requestShutdownAndInterrupt().
+    //
+    // IMPORTANT: uses requestShutdownAndInterrupt() NOT await server.shutdown() —
+    // the actor-isolated shutdown() cannot run while accept() is blocking the
+    // actor's thread (Phase 0.1 limitation, documented in UnixSocketServer.swift).
+    @Test("accept loop survives 5s idle — does not self-terminate without connections")
+    func test_acceptLoop_survivesIdleWithoutSelfTerminating() async throws {
+        let path = "/tmp/sh-accept-idle-\(UUID().uuidString.prefix(8)).s"
+        let config = UnixSocketConfig(socketPath: path, expectedMode: 0o600, expectedUid: UInt32(geteuid()))
+        let server = UnixSocketServer(config: config)
+        try await server.start()
+
+        actor LoopDone { var done = false; func mark() { done = true } }
+        let loopDone = LoopDone()
+
+        let loopTask = Task.detached {
+            await server.runAcceptLoop { _, _ in
+                WireResponse(id: nil, result: .null)
+            }
+            await loopDone.mark()
+        }
+
+        // Wait 5s — the loop must still be alive (no self-exit).
+        try await Task.sleep(nanoseconds: 5_000_000_000)
+
+        // At this point, if the bug were present, loopDone.done == true already.
+        let exitedSpontaneously = await loopDone.done
+        #expect(!exitedSpontaneously, "accept loop must NOT self-terminate during 5s idle (recurrence #3 regression guard)")
+
+        // Trigger intentional shutdown via the nonisolated interrupt (closes fd
+        // from outside the actor, waking the blocked accept() with EBADF).
+        server.requestShutdownAndInterrupt()
+        loopTask.cancel()
+        // Allow the loop to drain (EBADF → return path is synchronous after accept() unblocks).
+        try? await Task.sleep(nanoseconds: 500_000_000)
+    }
+
+    // T-07 (Multiple sequential connections): the accept loop persists across
+    // multiple normal connect/close cycles, proving it does NOT exit after the
+    // first successful accept iteration.
+    //
+    // We connect 5 times sequentially, verify each receives a response, then
+    // shutdown cleanly.
+    @Test("accept loop persists across multiple sequential connections")
+    func test_acceptLoop_persistsAcrossMultipleConnections() async throws {
+        let path = "/tmp/sh-accept-multi-\(UUID().uuidString.prefix(8)).s"
+        let config = UnixSocketConfig(socketPath: path, expectedMode: 0o600, expectedUid: UInt32(geteuid()))
+        let server = UnixSocketServer(config: config)
+        try await server.start()
+
+        actor ServedCount { var n = 0; func inc() { n += 1 } }
+        let servedCount = ServedCount()
+
+        let loopTask = Task.detached {
+            await server.runAcceptLoop { req, _ in
+                await servedCount.inc()
+                return WireResponse(id: req.id, result: .string("ack"))
+            }
+        }
+
+        // Helper: open a connection, send one request, read response, close.
+        func sendOneRequest(method: String, id: String) throws -> WireResponse? {
+            let fd = socket(AF_UNIX, Int32(SOCK_STREAM), 0)
+            guard fd >= 0 else { throw POSIXError(.EIO) }
+            defer { close(fd) }
+
+            var addr = sockaddr_un()
+            addr.sun_family = sa_family_t(AF_UNIX)
+            let bytes = Array(path.utf8)
+            let cap = MemoryLayout.size(ofValue: addr.sun_path)
+            guard bytes.count < cap else { throw POSIXError(.ENAMETOOLONG) }
+            withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
+                ptr.withMemoryRebound(to: UInt8.self, capacity: cap) { raw in
+                    for i in 0 ..< bytes.count { raw[i] = bytes[i] }
+                    raw[bytes.count] = 0
+                }
+            }
+            let rc = withUnsafePointer(to: &addr) { ptr in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sp in
+                    connect(fd, sp, socklen_t(MemoryLayout<sockaddr_un>.size))
+                }
+            }
+            guard rc == 0 else { throw POSIXError(.ECONNREFUSED) }
+
+            let req = WireRequest(method: method, id: id)
+            let data = try encodeWireFrame(req)
+            _ = data.withUnsafeBytes { ptr in write(fd, ptr.baseAddress, data.count) }
+
+            // Read response line.
+            var buf = Data()
+            var byte: UInt8 = 0
+            while true {
+                let n = read(fd, &byte, 1)
+                if n <= 0 { break }
+                if byte == 0x0A { break }
+                buf.append(byte)
+            }
+            guard !buf.isEmpty else { return nil }
+            return try? JSONDecoder().decode(WireResponse.self, from: buf)
+        }
+
+        // Five sequential connections.
+        for i in 1...5 {
+            // Brief yield so the accept loop can pick up the previous connection.
+            try await Task.sleep(nanoseconds: 20_000_000)
+            let resp = try sendOneRequest(method: "ping", id: "\(i)")
+            #expect(resp != nil, "connection \(i) must receive a response")
+            #expect(resp?.id == "\(i)", "response id must match request id for connection \(i)")
+        }
+
+        // Allow handlers to finish.
+        try await Task.sleep(nanoseconds: 100_000_000)
+        let total = await servedCount.n
+        #expect(total == 5, "all 5 connections must reach the handler; got \(total)")
+
+        // Use nonisolated interrupt to avoid deadlock with blocked accept().
+        server.requestShutdownAndInterrupt()
+        loopTask.cancel()
+    }
+
+    // T-08 (ECONNABORTED is transient): verify that an ECONNABORTED-equivalent
+    // reset-before-accept does NOT cause the loop to exit.
+    //
+    // Direct syscall injection is not possible in pure Swift without a C shim,
+    // so we simulate the scenario by opening + immediately RST-closing many
+    // connections via SO_LINGER=0. This generates accept() errors on Darwin
+    // similar to ECONNABORTED. After the burst, the server must still accept
+    // normal connections.
+    //
+    // Note: on macOS/Darwin, SO_LINGER(0) on AF_UNIX sends an RST-equivalent
+    // by closing the socket immediately. The accept loop must survive this.
+    @Test("accept loop survives aborted connections and continues serving")
+    func test_acceptLoop_survivesAbortedConnections() async throws {
+        let path = "/tmp/sh-accept-abrt-\(UUID().uuidString.prefix(8)).s"
+        let config = UnixSocketConfig(socketPath: path, expectedMode: 0o600, expectedUid: UInt32(geteuid()))
+        let server = UnixSocketServer(config: config)
+        try await server.start()
+
+        actor HandledCount { var n = 0; func inc() { n += 1 } }
+        let handledCount = HandledCount()
+
+        let loopTask = Task.detached {
+            await server.runAcceptLoop { req, _ in
+                await handledCount.inc()
+                return WireResponse(id: req.id, result: .string("ok"))
+            }
+        }
+
+        // Helper: connect + immediately abort (SO_LINGER=0 → RST on close).
+        func abortConnect() {
+            let fd = socket(AF_UNIX, Int32(SOCK_STREAM), 0)
+            guard fd >= 0 else { return }
+            var addr = sockaddr_un()
+            addr.sun_family = sa_family_t(AF_UNIX)
+            let bytes = Array(path.utf8)
+            let cap = MemoryLayout.size(ofValue: addr.sun_path)
+            guard bytes.count < cap else { close(fd); return }
+            withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
+                ptr.withMemoryRebound(to: UInt8.self, capacity: cap) { raw in
+                    for i in 0 ..< bytes.count { raw[i] = bytes[i] }
+                    raw[bytes.count] = 0
+                }
+            }
+            _ = withUnsafePointer(to: &addr) { ptr in
+                ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sp in
+                    connect(fd, sp, socklen_t(MemoryLayout<sockaddr_un>.size))
+                }
+            }
+            // SO_LINGER=0: close sends RST immediately rather than FIN.
+            var lg = linger(l_onoff: 1, l_linger: 0)
+            _ = withUnsafePointer(to: &lg) { ptr in
+                setsockopt(fd, SOL_SOCKET, SO_LINGER, ptr, socklen_t(MemoryLayout<linger>.size))
+            }
+            close(fd)
+        }
+
+        // Fire 8 abort-connects to stress the loop's error handling.
+        for _ in 0..<8 {
+            abortConnect()
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+
+        // After the aborts, the loop must still be alive. Send a good request.
+        try await Task.sleep(nanoseconds: 50_000_000)
+
+        let goodFd = socket(AF_UNIX, Int32(SOCK_STREAM), 0)
+        guard goodFd >= 0 else {
+            Issue.record("could not create test socket")
+            await server.shutdown()
+            loopTask.cancel()
+            return
+        }
+        defer { close(goodFd) }
+
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let bytes = Array(path.utf8)
+        let cap = MemoryLayout.size(ofValue: addr.sun_path)
+        guard bytes.count < cap else {
+            Issue.record("path too long")
+            await server.shutdown()
+            loopTask.cancel()
+            return
+        }
+        withUnsafeMutablePointer(to: &addr.sun_path) { ptr in
+            ptr.withMemoryRebound(to: UInt8.self, capacity: cap) { raw in
+                for i in 0 ..< bytes.count { raw[i] = bytes[i] }
+                raw[bytes.count] = 0
+            }
+        }
+        let rc = withUnsafePointer(to: &addr) { ptr in
+            ptr.withMemoryRebound(to: sockaddr.self, capacity: 1) { sp in
+                connect(goodFd, sp, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        #expect(rc == 0, "good connection must succeed after aborted connections (loop must still be alive)")
+
+        if rc == 0 {
+            let req = WireRequest(method: "smoke.check", id: "smoke")
+            if let data = try? encodeWireFrame(req) {
+                _ = data.withUnsafeBytes { ptr in write(goodFd, ptr.baseAddress, data.count) }
+            }
+            var buf = Data()
+            var byte: UInt8 = 0
+            while true {
+                let n = read(goodFd, &byte, 1)
+                if n <= 0 { break }
+                if byte == 0x0A { break }
+                buf.append(byte)
+            }
+            #expect(!buf.isEmpty, "must receive a response after aborted connections")
+        }
+
+        // Use nonisolated interrupt to avoid deadlock with blocked accept().
+        server.requestShutdownAndInterrupt()
+        loopTask.cancel()
+    }
 }
