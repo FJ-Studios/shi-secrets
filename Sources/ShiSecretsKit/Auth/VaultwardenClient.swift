@@ -160,11 +160,18 @@ public actor VaultwardenClient {
         // Ephemeral: no persistent cookies, no disk caching.
         config.urlCache = nil
         config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+        // W1.5 N3: enforce TLS 1.3 minimum — disallow TLS 1.2 fallback.
+        // macOS 10.15+ / iOS 13+ support TLS 1.3 natively via Security.framework.
+        config.tlsMinimumSupportedProtocolVersion = .TLSv13
         // Inject mock protocol classes for testing; nil in production.
         if let classes = urlProtocolClasses {
             config.protocolClasses = classes
         }
-        let validator = TLSPinValidator(pinnedSHA256: pinnedSHA256)
+        // W1.5 N2: load TLS pin from config chain if not injected explicitly.
+        // Callers may pass an explicit pin for test injection; production uses
+        // TLSPinValidator.loadPinnedSHA256() which reads env → vault.toml.
+        let resolvedPin = pinnedSHA256 ?? TLSPinValidator.loadPinnedSHA256()
+        let validator = TLSPinValidator(pinnedSHA256: resolvedPin)
         self.session = URLSession(
             configuration: config,
             delegate: validator,
