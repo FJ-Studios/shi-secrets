@@ -102,6 +102,37 @@ public struct Bootstrap {
         self.configYmlVaultServer = configYmlVaultServer
     }
 
+    /// Read `vault_url` from `~/.shikki/settings/secrets-brokerd.toml`.
+    /// Returns the value if present and non-empty, else `nil`.
+    ///
+    /// Parsing is intentionally simple line-by-line (no deps) — same
+    /// pattern as `SecretsBrokerdCommand.resolvedSocketPath()`.
+    /// Config-chain tier 1 (TOML file) per backlog item 5256133A.
+    public static func readVaultURLFromTOML(
+        homeDirectory: String = NSHomeDirectory()
+    ) -> String? {
+        let tomlPath = (homeDirectory as NSString)
+            .appendingPathComponent(".shikki/settings/secrets-brokerd.toml")
+        guard let text = try? String(contentsOfFile: tomlPath, encoding: .utf8) else {
+            return nil
+        }
+        for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
+            let line = rawLine.trimmingCharacters(in: .whitespaces)
+            guard !line.isEmpty, !line.hasPrefix("#") else { continue }
+            guard let eqIdx = line.firstIndex(of: "=") else { continue }
+            let lhs = line[..<eqIdx].trimmingCharacters(in: .whitespaces)
+            guard lhs == "vault_url" else { continue }
+            var rhs = line[line.index(after: eqIdx)...].trimmingCharacters(in: .whitespaces)
+            // Strip optional surrounding quotes (" or ')
+            if (rhs.hasPrefix("\"") && rhs.hasSuffix("\"")) ||
+               (rhs.hasPrefix("'") && rhs.hasSuffix("'")) {
+                rhs = String(rhs.dropFirst().dropLast())
+            }
+            if !rhs.isEmpty { return rhs }
+        }
+        return nil
+    }
+
     /// Load Vaultwarden credentials from the macOS Keychain, connect to
     /// the Vaultwarden API, and read the Ed25519 signing key.
     ///
@@ -123,11 +154,15 @@ public struct Bootstrap {
         }
 
         // 2. Connect to Vaultwarden (client_credentials token exchange).
+        // Config-chain: explicit init param → TOML file → SHIKKI_VAULT_URL → dev default.
+        // `configYmlVaultServer` from init covers test-injection (tier 0).
+        // `readVaultURLFromTOML()` covers production TOML config (tier 1).
+        let resolvedConfigURL = configYmlVaultServer ?? Self.readVaultURLFromTOML()
         let vaultClient: VaultwardenClient
         do {
             vaultClient = try VaultwardenClient(
                 credentials: credentials,
-                configYmlVaultServer: configYmlVaultServer
+                configYmlVaultServer: resolvedConfigURL
             )
             try await vaultClient.connect()
         } catch {

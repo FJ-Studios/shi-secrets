@@ -52,6 +52,10 @@ public enum VaultwardenClientError: Swift.Error, Sendable, Equatable {
 
     /// DELETE /api/ciphers/{id} returned a non-2xx status (W3 write path).
     case deleteCipherFailed(httpStatus: Int)
+
+    /// DNS lookup failed for the vault host — operator must set the URL via
+    /// SHIKKI_VAULT_URL or ~/.shikki/settings/secrets-brokerd.toml [vault_url].
+    case vaultHostUnreachable(message: String)
 }
 
 // MARK: - Internal token response shape
@@ -424,6 +428,14 @@ public actor VaultwardenClient {
         do {
             return try await session.data(for: request)
         } catch let urlError as URLError {
+            // Detect DNS NXDOMAIN / host-not-found errors and surface an
+            // actionable message with the config-chain remediation steps.
+            if urlError.code == .cannotFindHost || urlError.code == .dnsLookupFailed {
+                throw VaultwardenClientError.vaultHostUnreachable(
+                    message: "DNS lookup failed for vault host. "
+                    + "Set SHIKKI_VAULT_URL or ~/.shikki/settings/secrets-brokerd.toml [vault_url]"
+                )
+            }
             throw VaultwardenClientError.networkError(urlError.code)
         }
     }
