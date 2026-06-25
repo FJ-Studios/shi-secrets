@@ -42,6 +42,10 @@ actor VaultwardenTokenCache {
     struct TokenEntry {
         let token: String
         let expiresAt: Date
+        /// W6.5: session_fingerprint binding. `nil` for entries written before
+        /// W6.5 (read path treats `nil` as "no binding" for backward compat;
+        /// next write upgrades the entry).
+        let sessionFingerprint: String?
         // NOTE: NOT Codable on purpose — prevents accidental JSON serialization
         // to disk (T-W2-K05). JSON encoding happens ONLY inside writeToken().
     }
@@ -89,13 +93,18 @@ actor VaultwardenTokenCache {
 
     /// Read the cached token. Returns `nil` if absent or if stored bytes are corrupt
     /// (corruption logs a warning and falls through to `nil` — triggers re-fetch).
+    ///
+    /// W6.5: also returns `session_fingerprint` if present in the JSON; legacy
+    /// entries written before W6.5 have `nil` and are accepted (caller decides
+    /// whether to enforce fingerprint binding).
     func readToken() async throws -> TokenEntry? {
         guard let data = try await store.read(service: keychainService,
                                               account: keychainAccount) else {
             logger.debug("[token-cache] cache miss — no Keychain entry")
             return nil
         }
-        // Decode {"token":"...","expires_at":"ISO8601"}
+        // Decode {"token":"...","expires_at":"ISO8601","session_fingerprint":"...?"}
+        // (session_fingerprint is OPTIONAL — added in W6.5; legacy entries lack it.)
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: String],
               let tokenStr = json["token"],
               let expiresAtStr = json["expires_at"],
@@ -105,19 +114,58 @@ actor VaultwardenTokenCache {
             try? await store.delete(service: keychainService, account: keychainAccount)
             return nil
         }
-        return TokenEntry(token: tokenStr, expiresAt: expiresAt)
+        let fingerprint = json["session_fingerprint"]  // nil for legacy entries
+        return TokenEntry(token: tokenStr, expiresAt: expiresAt, sessionFingerprint: fingerprint)
     }
 
     /// Write token + expiresAt to Keychain. The token string is NEVER written
     /// to any file on disk; only the Keychain blob is touched.
-    func writeToken(_ token: String, expiresAt: Date) async throws {
-        let payload: [String: String] = [
+    ///
+    /// W6.5: `sessionFingerprint` defaults to the current session's fingerprint
+    /// (via `SessionFingerprint.current()`); pass `nil` explicitly to skip
+    /// fingerprint binding (test code only).
+    func writeToken(
+        _ token: String,
+        expiresAt: Date,
+        sessionFingerprint: String? = nil
+    ) async throws {
+        // Use the explicitly passed fingerprint, or compute current.
+        let effectiveFingerprint = sessionFingerprint ?? SessionFingerprint.current()
+        var payload: [String: String] = [
             "token":      token,
             "expires_at": ISO8601DateFormatter().string(from: expiresAt),
         ]
+        if let fp = effectiveFingerprint {
+            payload["session_fingerprint"] = fp
+        }
         let data = try JSONSerialization.data(withJSONObject: payload)
         try await store.write(data, service: keychainService, account: keychainAccount)
         logger.debug("[token-cache] token written to Keychain, expires \(ISO8601DateFormatter().string(from: expiresAt))")
+    }
+
+    /// W6.5 — convenience check used by Bootstrap to decide whether to honor
+    /// a cached token or treat it as `lockedBySessionChange`.
+    ///
+    /// `nonisolated` because the check reads only the (passed-in) `TokenEntry`
+    /// + the platform fingerprint (which is its own thread-safe static).
+    /// No actor-isolated state is touched, so callers may invoke it
+    /// synchronously from any context.
+    ///
+    /// Returns:
+    ///   • `true` if the entry has no fingerprint (legacy / opt-out)
+    ///     OR the fingerprint matches the current session
+    ///   • `false` if fingerprints differ → caller should treat as locked
+    nonisolated func sessionFingerprintMatches(entry: TokenEntry) -> Bool {
+        guard let stored = entry.sessionFingerprint else {
+            // Legacy entry (no fingerprint): backward-compatible, accept.
+            return true
+        }
+        guard let current = SessionFingerprint.current() else {
+            // Platform lookup failed: defensive default — accept (don't
+            // lock the operator out on a transient sysctl/loginctl failure).
+            return true
+        }
+        return stored == current
     }
 
     /// Delete the cached token from Keychain.
