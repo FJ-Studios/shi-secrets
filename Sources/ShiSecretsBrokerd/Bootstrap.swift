@@ -141,13 +141,24 @@ public struct Bootstrap {
     /// seeds the in-process SessionCache and skips the OAuth round-trip —
     /// this is the primary cure for the 429 storm.
     ///
+    /// W3.1: Calls migrateLegacyIfPresent() once per process before load()
+    /// so operators who seeded under eu.fj-studios.shikki.vault are auto-upgraded
+    /// to io.shikki.vault on first brokerd boot. The migration is idempotent.
+    ///
     /// On missing Keychain entry, throws `.keychainCredentialsMissing` with
     /// a message pointing to `shi secrets setup` (W2, task #113).
     public func unseal() async throws -> (vaultClient: VaultwardenClient, signingKey: BrokerSigningKey) {
+        // 0. W3.1: Migrate legacy eu.fj-studios service name → io.shikki canonical.
+        //    Called once per process; idempotent; no-op if legacy absent.
+        let keychain = KeychainVaultCredentials()
+        try? keychain.migrateLegacyIfPresent()
+        // Ignore migration errors — if migration fails the subsequent load()
+        // will surface the real error (itemNotFound, dataMalformed, osError).
+
         // 1. Load credentials from Keychain (replaces getenv("BW_SESSION")).
         let credentials: VaultwardenCredentials
         do {
-            credentials = try KeychainVaultCredentials().load()
+            credentials = try keychain.load()
         } catch KeychainVaultCredentials.KeychainError.itemNotFound {
             // Clear setup error — operator has not run `shi secrets setup` yet.
             // W2 task #113 ships that command.

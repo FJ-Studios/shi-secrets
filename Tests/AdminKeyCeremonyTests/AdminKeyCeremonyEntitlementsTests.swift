@@ -84,7 +84,9 @@ final class AdminKeyCeremonyEntitlementsTests: XCTestCase {
         XCTAssertNotNil(groups, "keychain-access-groups must be an array of strings")
         XCTAssertFalse(groups?.isEmpty ?? true, "keychain-access-groups must not be empty")
         // The group must reference the shikki admin service ID.
-        // Bundle ID prefix is eu.fj-studios.shikki.* (team SH7MZH647S).
+        // W3.1: canonical bundle prefix is io.shikki.* (product domain mandate).
+        // The assertion checks for "shikki.admin" substring which matches both
+        // the new io.shikki.admin-key-ceremony and any future io.shikki.admin* identifiers.
         let hasAdminGroup = groups?.contains(where: { $0.contains("shikki.admin") }) ?? false
         XCTAssertTrue(hasAdminGroup,
             "keychain-access-groups must include shikki.admin, got: \(groups ?? [])")
