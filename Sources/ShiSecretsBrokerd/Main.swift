@@ -122,11 +122,21 @@ struct BrokerMain {
         let verifier      = ManifestVerifier(pinnedPublicKey: signingKey.privateKey.publicKey)
         let manifestStore = ManifestStore(verifier: verifier, seams: seams)
 
-        // ScopeValidator: empty allowlist in standalone dev mode.
-        // secret.get requests will fail with scopePatternDenied until the
-        // operator configures allowed scopes. secret.list / secret.set
-        // bypass handleRequest and work immediately.
-        let scopeValidator = try ScopeValidator(allowlist: [])
+        // ScopeValidator: load allowlist from ~/.shikki/settings/secrets-brokerd.toml
+        // [scope].allowlist. On first boot, if the config is absent, a dev-friendly
+        // default ["**"] is seeded and a WARN is emitted.
+        //
+        // secret.list / secret.set bypass handleRequest and work regardless of the
+        // allowlist. Only secret.get is gated.
+        let brokerdSettings = BrokerdSettings.loadOrDefault()
+        try? BrokerdSettings.writeDefaultIfMissing(
+            at: URL(fileURLWithPath: (NSHomeDirectory() as NSString)
+                .appendingPathComponent(".shikki/settings/secrets-brokerd.toml"))
+        )
+        if brokerdSettings.isWildcardAllowlist {
+            log("shikki-secrets-brokerd: WARN scope allowlist is \"**\" — DEV ONLY. Configure ~/.shikki/settings/secrets-brokerd.toml [scope].allowlist for production (e.g. allowlist = [\"shi/**\", \"ci/**\"])")
+        }
+        let scopeValidator = try ScopeValidator(allowlist: brokerdSettings.scopeAllowlist)
 
         let bridge = MCPBridge()
 

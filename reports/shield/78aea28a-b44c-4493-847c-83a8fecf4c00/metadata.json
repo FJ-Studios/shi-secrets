@@ -1,0 +1,15 @@
+{
+  "duration_ms": 244964,
+  "finished_at": "2026-06-19T19:01:07Z",
+  "panel_size": 2,
+  "panelists": [
+    {"persona": "tech-expert", "outcome": "complete", "duration_ms": 244964, "findings_count": 0},
+    {"persona": "kintsugi", "outcome": "complete", "duration_ms": 172279, "findings_count": 0}
+  ],
+  "run_id": "78aea28a-b44c-4493-847c-83a8fecf4c00",
+  "single_operator": false,
+  "started_at": "2026-06-19T18:57:02Z",
+  "target": "pr/1",
+  "target_sha": "1bc3fd71ae40757c0ed3c0e16b06347c5fa056ba",
+  "verdict": "PERFECT"
+}

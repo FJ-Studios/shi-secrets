@@ -52,6 +52,11 @@ public struct ScopeValidator: Sendable {
 
     /// Validates a caller-supplied scope string. Throws on regex syntax,
     /// overlong patterns, or allowlist miss.
+    ///
+    /// Each entry in `allowlist` is treated as a glob pattern:
+    ///   - `**`  matches any scope at any depth.
+    ///   - `*`   matches one path segment (no `/` characters).
+    ///   - All other characters are matched literally.
     public func validate(pattern: String) throws {
         if pattern.count > Self.maxScopeLength {
             throw ValidationError.scopeTooLong(length: pattern.count)
@@ -59,8 +64,84 @@ public struct ScopeValidator: Sendable {
         for ch in pattern where Self.forbiddenRegexCharacters.contains(ch) {
             throw ValidationError.regexSyntaxForbidden(pattern: pattern)
         }
-        guard allowlist.contains(pattern) else {
+        let matched = allowlist.contains { globPattern in
+            Self.globMatches(pattern: globPattern, scope: pattern)
+        }
+        guard matched else {
             throw ValidationError.scopePatternDenied(pattern: pattern)
         }
+    }
+
+    // MARK: - Glob matching
+
+    /// Returns true when `pattern` (a glob) matches `scope` (a literal scope string).
+    ///
+    /// Rules:
+    ///   - `**`        matches zero or more path segments (any character including `/`).
+    ///   - `*`         matches exactly one path segment (no `/`).
+    ///   - Other chars match literally.
+    ///
+    /// Implemented via recursive descent; the allowlist is small (≤50 entries)
+    /// and scopes are short (≤256 chars) so no memoization is needed.
+    public static func globMatches(pattern: String, scope: String) -> Bool {
+        let p = Array(pattern)
+        let s = Array(scope)
+        return globMatchImpl(p: p, pIdx: 0, s: s, sIdx: 0)
+    }
+
+    private static func globMatchImpl(
+        p: [Character], pIdx: Int,
+        s: [Character], sIdx: Int
+    ) -> Bool {
+        var pi = pIdx
+        var si = sIdx
+
+        while pi < p.count {
+            let pc = p[pi]
+
+            if pc == "*" {
+                // Check for "**"
+                if pi + 1 < p.count && p[pi + 1] == "*" {
+                    // "**" — match zero or more characters including "/"
+                    // Skip consecutive ** groups
+                    var nextPi = pi + 2
+                    // Skip an optional "/" separator after **
+                    if nextPi < p.count && p[nextPi] == "/" {
+                        nextPi += 1
+                    }
+                    if nextPi == p.count {
+                        // "**" at the end of the pattern → matches everything remaining
+                        return true
+                    }
+                    // Try matching the rest of the pattern at every position in scope
+                    for tryIdx in si...s.count {
+                        if globMatchImpl(p: p, pIdx: nextPi, s: s, sIdx: tryIdx) {
+                            return true
+                        }
+                    }
+                    return false
+                } else {
+                    // Single "*" — match one segment (no "/")
+                    pi += 1
+                    // Advance si consuming non-"/" characters
+                    while si < s.count && s[si] != "/" {
+                        si += 1
+                    }
+                    // At this point si is either at end or at "/"
+                    // Continue matching — the loop will handle the next character
+                    continue
+                }
+            } else {
+                // Literal character must match
+                if si >= s.count || s[si] != pc {
+                    return false
+                }
+                pi += 1
+                si += 1
+            }
+        }
+
+        // Pattern exhausted — scope must also be exhausted for a full match
+        return si == s.count
     }
 }
