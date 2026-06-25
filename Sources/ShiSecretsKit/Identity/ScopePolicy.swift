@@ -36,7 +36,14 @@ public struct ScopePolicy: Sendable, Equatable {
     /// Returns the decision + reason for a path; useful for surfacing
     /// `DENY` reasons in operator-facing errors.
     public func decide(_ path: String) -> Decision {
-        let trimmed = path.trimmingCharacters(in: .whitespacesAndNewlines)
+        // v0.4.2 @tech-expert fix: lowercase the path too (was already
+        // lowercasing systemName via LOW-5). Bitwarden collection paths
+        // can have mixed-case entries; without normalisation
+        // `shi/system/MAC-LAPTOP-SHIKKI/k` would be denied even when
+        // systemName == "mac-laptop-shikki".
+        let trimmed = path
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
         guard !trimmed.isEmpty else { return .denied(reason: .emptyPath) }
 
         // Self-scope: `shi/system/<self>/...`

@@ -81,8 +81,16 @@ public struct BrokerdSettings: Sendable, Equatable {
         do {
             return try load(from: path)
         } catch {
-            // Malformed file → fall through to safe dev default.
-            return BrokerdSettings(scopeAllowlist: ["**"], vaultURL: nil)
+            // v0.4.2 @ronin FINDING-2 fix: malformed-TOML must NOT silently
+            // revert to the maximally-permissive `["**"]` default. Attacker
+            // who can write the config (e.g. via symlink race on
+            // ~/.shikki/settings/) would otherwise get wildcard scope. Refuse
+            // by returning an empty allowlist; Main.swift's empty-check at
+            // boot time (HIGH-6 guard) will then exit 78 with a clear error.
+            FileHandle.standardError.write(Data(
+                "shikki-secrets-brokerd: WARN refusing malformed allowlist at \(path.path) — empty allowlist returned; daemon will refuse to start.\n".utf8
+            ))
+            return BrokerdSettings(scopeAllowlist: [], vaultURL: nil)
         }
     }
 

@@ -117,6 +117,13 @@ public struct HankoSigilExchange: Sendable {
         ttlSeconds: Int = 300
     ) -> SigilEnvelope {
         let cappedTTL = min(ttlSeconds, Self.envelopeMaxTTLSeconds)
+        // v0.4.2 @kintsugi UX-B fix: surface the silent cap to stderr so
+        // callers don't discover via "sigil expired" debugging hours later.
+        if ttlSeconds > Self.envelopeMaxTTLSeconds {
+            FileHandle.standardError.write(Data(
+                "⚠  WARN: requested sigil TTL \(ttlSeconds)s exceeds envelopeMaxTTLSeconds (\(Self.envelopeMaxTTLSeconds)s); capped to \(cappedTTL)s\n".utf8
+            ))
+        }
         return SigilEnvelope(
             sigilID: uuidProvider(),
             vaultURL: vaultURL,
@@ -138,6 +145,15 @@ public struct HankoSigilExchange: Sendable {
         let now = nowProvider()
         guard envelope.isLive(at: now) else {
             return .sigilExpired
+        }
+        // v0.4.2 @ronin FINDING-3 + @tech-expert fix: SigilEnvelope.init is
+        // public — a caller can construct an envelope with arbitrary
+        // expiresAt and bypass the cap in `emit()`. Enforce the same ceiling
+        // here so the invariant holds for ALL envelopes, including those
+        // deserialized from network/disk or constructed directly.
+        let envelopeCap = now.addingTimeInterval(TimeInterval(Self.envelopeMaxTTLSeconds))
+        guard envelope.expiresAt <= envelopeCap else {
+            return .envelopeTTLExceedsCap(envelopeExpires: envelope.expiresAt, cap: envelopeCap)
         }
         guard envelope.machineIDEmitting != machineIDRedeeming else {
             return .sameMachineRefused
@@ -170,5 +186,9 @@ public struct HankoSigilExchange: Sendable {
         case brokerFailed(reason: String)
         case brokerTTLViolation(brokerTTL: Date, cap: Date)
         case machineIDMismatch(expected: String, got: String)
+        /// v0.4.2 @ronin FINDING-3: envelope expiresAt exceeds the 5-min cap.
+        /// Returned even for non-emit() constructed envelopes (defense against
+        /// the public init bypass identified in v0.4.1 post-ship review).
+        case envelopeTTLExceedsCap(envelopeExpires: Date, cap: Date)
     }
 }
