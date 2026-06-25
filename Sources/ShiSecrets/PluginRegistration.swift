@@ -25,7 +25,9 @@ public struct ShiSecretsPlugin: PluginCLISurface {
         "revoke",
         "audit",
         "brokerd",
-        "setup",           // W3.1: `shi secrets setup vault-credentials` + `shi secrets setup install`
+        "setup",           // W3.1: `shi secrets setup vault-credentials` + W6 `shi secrets setup wizard`
+        "login",           // W7: bootstrap canonical brokerd plist
+        "logout",          // W7: bootout all labels + archive stale plists
     ]
 
     /// Dispatch entry-point called by shikki-cli for `shi secrets <subVerb> [args...]`.
@@ -154,6 +156,11 @@ public struct ShiSecretsPlugin: PluginCLISurface {
                 return 1
             }
             return try await SecretsBrokerdCommand(action: action).run()
+
+        case "login":
+            return await runLogin(args: args)
+        case "logout":
+            return runLogout(args: args)
 
         case "setup":
             // `shi secrets setup wizard [flags]`            — W6 one-click bootstrap
@@ -339,5 +346,64 @@ public struct ShiSecretsPlugin: PluginCLISurface {
             """,
             stderr
         )
+    }
+
+    // MARK: - login / logout helpers (W7)
+
+    private static func runLogin(args: [String]) async -> Int32 {
+        if args.contains("--help") || args.contains("-h") {
+            fputs(
+                """
+                OVERVIEW: Bootstrap the canonical io.shikki.secrets-brokerd launchd plist.
+                Refuses an adhoc-signed brokerd binary; requires OBYW.ONE TeamID
+                (SH7MZH647S). Idempotent — no-op if the socket is already up.
+
+                USAGE: shi secrets login [--socket-wait <seconds>]
+
+                """,
+                stderr
+            )
+            return 0
+        }
+        var socketWait = 10
+        var i = 0
+        while i < args.count {
+            if args[i] == "--socket-wait", i + 1 < args.count, let n = Int(args[i + 1]) {
+                socketWait = n; i += 2; continue
+            }
+            i += 1
+        }
+        let cmd = LoginCommand(socketWaitSeconds: socketWait)
+        let outcome = await cmd.run()
+        fputs("\(outcome.operatorMessage)\n", outcome.exitCode == 0 ? stdout : stderr)
+        return outcome.exitCode
+    }
+
+    private static func runLogout(args: [String]) -> Int32 {
+        if args.contains("--help") || args.contains("-h") {
+            fputs(
+                """
+                OVERVIEW: Bootout the canonical brokerd launchd label + any legacy labels
+                (eu.fj-studios.shikki.secrets-brokerd, one.obyw.shikki.secrets-brokerd).
+                Archives any stale plists at non-canonical paths under
+                ~/.shikki/LaunchAgents/ or ~/.local/share/shikki/LaunchAgents/.
+
+                USAGE: shi secrets logout
+
+                """,
+                stderr
+            )
+            return 0
+        }
+        let outcome = LogoutCommand().run()
+        if case .completed(let attempts, let archived) = outcome {
+            for (label, code) in attempts {
+                print("bootout \(label): exit \(code)")
+            }
+            for path in archived {
+                print("archived stale: \(path)")
+            }
+        }
+        return outcome.exitCode
     }
 }
