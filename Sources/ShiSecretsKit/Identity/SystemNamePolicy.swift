@@ -63,7 +63,14 @@ public enum SystemNamePolicy {
             .map { String($0) }
             .joined()
         let stripped = stripDashes(prefix)
-        if stripped.isEmpty { return "shikki" }
+        if stripped.isEmpty {
+            // MED-3 fix (@security panel): empty hostname previously returned
+            // the literal "shikki" — two machines with all-symbol hostnames
+            // would collide and gain mutual scope access. Append a short
+            // entropy suffix so each install gets a unique name.
+            let suffix = String(UUID().uuidString.prefix(8)).lowercased()
+            return "shikki-\(suffix)"
+        }
         return "\(stripped)-shikki"
     }
 

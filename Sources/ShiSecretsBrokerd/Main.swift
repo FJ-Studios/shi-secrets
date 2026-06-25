@@ -136,7 +136,25 @@ struct BrokerMain {
         if brokerdSettings.isWildcardAllowlist {
             log("shikki-secrets-brokerd: WARN scope allowlist is \"**\" — DEV ONLY. Configure ~/.shikki/settings/secrets-brokerd.toml [scope].allowlist for production (e.g. allowlist = [\"shi/**\", \"ci/**\"])")
         }
+        // HIGH-6 fix: refuse start with empty allowlist (silent DoS fingerprint).
+        if brokerdSettings.scopeAllowlist.isEmpty {
+            FileHandle.standardError.write(Data(
+                "shikki-secrets-brokerd: ERROR scope allowlist is empty — refusing to start. Configure ~/.shikki/settings/secrets-brokerd.toml [scope].allowlist with at least one pattern (e.g. allowlist = [\"shi/**\"]).\n".utf8
+            ))
+            exit(78)
+        }
         let scopeValidator = try ScopeValidator(allowlist: brokerdSettings.scopeAllowlist)
+
+        // CRIT-1 fix: load per-system ScopePolicy at startup. If
+        // ~/.shikki/etc/secrets/system-name is present, enforce blast-radius
+        // isolation (W6.5c F-PSA-3). Absent file = no secondary check (legacy
+        // installs pre-W6.5c continue to work; allowlist remains the gate).
+        let systemScopePolicy: ScopePolicy? = {
+            let writer = LiveSystemNameWriter()
+            guard let name = try? writer.read() else { return nil }
+            log("shikki-secrets-brokerd: per-system ScopePolicy active for systemName=\(name)")
+            return ScopePolicy(systemName: name)
+        }()
 
         let bridge = MCPBridge()
 
@@ -173,6 +191,7 @@ struct BrokerMain {
             engine: engine,
             manifestStore: manifestStore,
             scopeValidator: scopeValidator,
+            systemScopePolicy: systemScopePolicy,
             bridge: bridge,
             socket: socket,
             bwClient: bwClient,

@@ -70,6 +70,9 @@ public enum VaultHealth: Sendable, Equatable {
     case reachable(host: String)
     case cooldown429(nextMinutes: Int)
     case unreachable
+    /// MED-4 fix (@security panel): yellow state when no real probe ran.
+    /// Prevents the false-green case during an actual vault outage.
+    case unknownUnprobed(host: String)
 }
 
 public enum SyncHealth: Sendable, Equatable {
@@ -101,7 +104,11 @@ extension CacheHealth {
 
 extension VaultHealth {
     var isRed: Bool { if case .unreachable = self { return true }; return false }
-    var isYellow: Bool { if case .cooldown429 = self { return true }; return false }
+    var isYellow: Bool {
+        if case .cooldown429 = self { return true }
+        if case .unknownUnprobed = self { return true } // MED-4: stub = yellow, not green
+        return false
+    }
 }
 
 extension SyncHealth {
@@ -171,9 +178,10 @@ public struct LiveBrokerdProbe: BrokerdProbing {
     public func vaultHost() -> String? { "vw.obyw.one" }
 
     public func vaultProbe() -> VaultHealth {
-        // Lightweight probe: just report the configured host as reachable.
-        // A future ImplStage2 wave can wire a real HEAD probe behind a 2s timeout.
-        if let h = vaultHost() { return .reachable(host: h) }
+        // MED-4 fix (@security panel): stub returns `.unknownUnprobed` (yellow)
+        // not `.reachable` (green) — avoids the false-green case during a real
+        // vault outage. Real HEAD probe is W8-stage2 follow-up work.
+        if let h = vaultHost() { return .unknownUnprobed(host: h) }
         return .unreachable
     }
 
@@ -257,6 +265,7 @@ public struct StatusCommand {
             case .reachable(let h): return "vault:\(h)"
             case .cooldown429(let next): return "vault:429-cooldown(next:\(next)min)"
             case .unreachable: return "vault:UNREACHABLE"
+            case .unknownUnprobed(let h): return "vault:\(h)(unprobed)"
             }
         }()
         let sync: String = {
@@ -319,6 +328,7 @@ public struct StatusCommand {
         case .reachable(let h): return "reachable:\(h)"
         case .cooldown429(let m): return "429:\(m)m"
         case .unreachable: return "unreachable"
+        case .unknownUnprobed(let h): return "unprobed:\(h)"
         }
     }
     private static func describe(_ s: SyncHealth) -> String {

@@ -100,20 +100,28 @@ public struct HankoSigilExchange: Sendable {
         self.uuidProvider = uuidProvider
     }
 
+    /// Maximum permissible envelope TTL. CRIT-3 (@security panel 2026-06-25):
+    /// the W10 5-min cap was enforced on the broker-minted token but NOT on
+    /// the envelope itself, leaving a 59-minute redemption window for a
+    /// stolen envelope. Now capped at the same 300s ceiling.
+    public static let envelopeMaxTTLSeconds: Int = 300
+
     /// Build an envelope from the originating machine's session. Default TTL
-    /// is 1h (configurable per W10-T-03 spec).
+    /// is 300s (CRIT-3 fix — was 3600s, leaving a 59-minute redemption window).
+    /// Cannot exceed `envelopeMaxTTLSeconds`.
     public func emit(
         vaultURL: String,
         tokenReference: String,
         hankoJWTProof: String,
         machineIDEmitting: String,
-        ttlSeconds: Int = 3600
+        ttlSeconds: Int = 300
     ) -> SigilEnvelope {
+        let cappedTTL = min(ttlSeconds, Self.envelopeMaxTTLSeconds)
         return SigilEnvelope(
             sigilID: uuidProvider(),
             vaultURL: vaultURL,
             tokenReference: tokenReference,
-            expiresAt: nowProvider().addingTimeInterval(TimeInterval(ttlSeconds)),
+            expiresAt: nowProvider().addingTimeInterval(TimeInterval(cappedTTL)),
             hankoJWTProof: hankoJWTProof,
             machineIDEmitting: machineIDEmitting
         )
@@ -142,7 +150,10 @@ public struct HankoSigilExchange: Sendable {
         }
         // Enforce TTL ceiling: never accept a broker-issued token that
         // outlives the W10 5-min guarantee, even if the broker returned one.
-        let cap = now.addingTimeInterval(TimeInterval(maxAllowedTokenTTLSeconds))
+        // MED-8 fix: re-capture now after the broker call so the cap reflects
+        // wall-clock at response time, not at request issuance.
+        let nowAfterBroker = nowProvider()
+        let cap = nowAfterBroker.addingTimeInterval(TimeInterval(maxAllowedTokenTTLSeconds))
         if token.expiresAt > cap {
             return .brokerTTLViolation(brokerTTL: token.expiresAt, cap: cap)
         }

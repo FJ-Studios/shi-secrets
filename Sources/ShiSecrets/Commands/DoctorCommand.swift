@@ -151,6 +151,16 @@ public struct DoctorCheckOrphanedSocket: DoctorCheck {
 
     public func fix(dryRun: Bool) -> DoctorFixResult {
         if dryRun { return .fixed(action: "Would rm \(socketPath)") }
+        // HIGH-3 fix (@security panel): re-verify precondition before
+        // destructive action. Between detect() and fix() a brokerd could have
+        // started and bound the socket; we'd otherwise unlink a live socket
+        // and cause a denial-of-service.
+        if !probe.pids().isEmpty {
+            return .refused(reason: "brokerd PID appeared between detect and fix — not removing live socket")
+        }
+        guard FileManager.default.fileExists(atPath: socketPath) else {
+            return .noop
+        }
         do {
             try FileManager.default.removeItem(atPath: socketPath)
             return .fixed(action: "Removed orphaned socket file")

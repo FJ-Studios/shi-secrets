@@ -20,10 +20,12 @@ import Foundation
 public struct ScopePolicy: Sendable, Equatable {
 
     /// The system name this policy is bound to (e.g. `mac-laptop-shikki`).
+    /// LOW-5 fix (@security panel): always lowercased so a case-mismatched
+    /// system-name file cannot cause `decide()` to miss its own scope.
     public let systemName: String
 
     public init(systemName: String) {
-        self.systemName = systemName
+        self.systemName = systemName.lowercased()
     }
 
     /// Returns `true` iff this system is permitted to read the given path.
