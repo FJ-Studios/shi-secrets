@@ -113,6 +113,17 @@ public actor BrokerWireDispatcher {
         let wrapped = await bridge.wrapUnixRequest(payload: payload, peerUid: peerUid)
 
         let response = await daemon.handleRequest(brokerRequest, wrapped: wrapped)
+
+        // W4.2 — local-unix callers receive .boundPlaintext. The existing
+        // ProductionBrokerClient.get() expects result: .string(value) (not
+        // an object envelope). Emit the plaintext directly so the client
+        // decode path succeeds without cross-repo changes.
+        //
+        // All other response cases use the standard toWireResponse() encoder.
+        if case let .boundPlaintext(_, plaintext) = response {
+            return WireResponse(id: request.id, result: .string(plaintext))
+        }
+
         do {
             return try response.toWireResponse(id: request.id)
         } catch {
