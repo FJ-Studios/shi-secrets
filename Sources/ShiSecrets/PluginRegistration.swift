@@ -9,7 +9,7 @@
 import Foundation
 import ShikkiPluginAPI
 
-/// ShiSecretsPlugin — registers `shi secrets` verb and its 9 sub-verbs with shikki-cli.
+/// ShiSecretsPlugin — registers `shi secrets` verb and its 11 sub-verbs with shikki-cli.
 public struct ShiSecretsPlugin: PluginCLISurface {
 
     public static let verb = "secrets"
@@ -25,6 +25,7 @@ public struct ShiSecretsPlugin: PluginCLISurface {
         "revoke",
         "audit",
         "brokerd",
+        "setup",           // W3.1: `shi secrets setup vault-credentials` + `shi secrets setup install`
     ]
 
     /// Dispatch entry-point called by shikki-cli for `shi secrets <subVerb> [args...]`.
@@ -154,9 +155,115 @@ public struct ShiSecretsPlugin: PluginCLISurface {
             }
             return try await SecretsBrokerdCommand(action: action).run()
 
+        case "setup":
+            // `shi secrets setup vault-credentials [flags]` — W3.1
+            // `shi secrets setup install` — install launchd plist (referenced in error messages)
+            guard let subAction = args.first else {
+                fputs("Usage: shi secrets setup <vault-credentials|install> [flags]\n", stderr)
+                return 1
+            }
+            switch subAction {
+            case "vault-credentials":
+                return await runSetupVaultCredentials(args: Array(args.dropFirst()))
+            case "install":
+                // TODO W4: install the launchd plist. For now, surface a clear message.
+                fputs(
+                    """
+                    shi secrets setup install: not yet implemented in this binary.
+                    Run the install script manually or use `shi pickup shi-secrets`.
+                    """,
+                    stderr
+                )
+                return 1
+            default:
+                fputs("Unknown setup sub-action: \(subAction). Try: vault-credentials, install\n", stderr)
+                return 1
+            }
+
         default:
             fputs("Unknown secrets sub-verb: \(subVerb). Try: \(subVerbs.joined(separator: ", "))\n", stderr)
             return 1
         }
+    }
+
+    // MARK: - setup vault-credentials helper
+
+    private static func runSetupVaultCredentials(args: [String]) async -> Int32 {
+        // Parse flags manually (no ArgumentParser dep in ShiSecrets target).
+        var clientID: String? = nil
+        var serverURL: String? = nil
+        var clientSecretArg: String? = nil
+        var force = false
+        var noVerify = false
+
+        var i = 0
+        while i < args.count {
+            switch args[i] {
+            case "--client-id":
+                i += 1; if i < args.count { clientID = args[i] }
+            case "--server-url":
+                i += 1; if i < args.count { serverURL = args[i] }
+            case "--client-secret":
+                i += 1; if i < args.count { clientSecretArg = args[i] }
+            case "--force":
+                force = true
+            case "--no-verify":
+                noVerify = true
+            case "--help", "-h":
+                printSetupVaultCredentialsHelp()
+                return 0
+            default:
+                fputs("Unknown flag: \(args[i])\n", stderr)
+                printSetupVaultCredentialsHelp()
+                return 1
+            }
+            i += 1
+        }
+
+        guard let resolvedClientID = clientID, !resolvedClientID.isEmpty else {
+            fputs("ERROR: --client-id is required.\n", stderr)
+            printSetupVaultCredentialsHelp()
+            return 1
+        }
+        guard let resolvedServerURL = serverURL, !resolvedServerURL.isEmpty else {
+            fputs("ERROR: --server-url is required.\n", stderr)
+            printSetupVaultCredentialsHelp()
+            return 1
+        }
+
+        let cmd = SecretsSetupVaultCredentialsCommand(
+            clientID: resolvedClientID,
+            serverURL: resolvedServerURL,
+            clientSecretArg: clientSecretArg,
+            force: force,
+            noVerify: noVerify
+        )
+        return await cmd.run()
+    }
+
+    private static func printSetupVaultCredentialsHelp() {
+        fputs(
+            """
+            OVERVIEW: Seed Vaultwarden OAuth credentials (client_id, client_secret, server_url)
+            into the macOS Keychain. First-time setup, after Keychain wipe, or after
+            Bitwarden API key rotation.
+
+            Get client_id + client_secret from your Bitwarden account at
+            Settings → Security → Keys → API Key.
+
+            USAGE: shi secrets setup vault-credentials --client-id <id> --server-url <url> [flags]
+
+            FLAGS:
+              --client-id <user.UUID>      Required. Bitwarden client_id (must start with "user.").
+              --server-url <https://...>   Required. Vaultwarden server URL.
+              --client-secret <secret>     Optional. Prompted with no-echo if omitted.
+                                           Pass "-" to read a single line from stdin.
+              --force                      Overwrite an existing Keychain entry.
+              --no-verify                  Skip the OAuth round-trip verification.
+              --help                       Show this help.
+
+            """,
+            stderr
+        )
     }
 }

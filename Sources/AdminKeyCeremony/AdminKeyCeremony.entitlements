@@ -4,7 +4,7 @@
 <dict>
     <key>keychain-access-groups</key>
     <array>
-        <string>$(AppIdentifierPrefix)eu.fj-studios.shikki.admin-key-ceremony</string>
+        <string>$(AppIdentifierPrefix)io.shikki.admin-key-ceremony</string>
     </array>
 </dict>
 </plist>

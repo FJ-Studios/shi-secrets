@@ -14,8 +14,13 @@ import Security
 //
 // Output: a base64-encoded Curve25519 public key (32 bytes) on stdout.
 // Side effect: a new Keychain item under
-//   kSecAttrService = "eu.fj-studios.shikki.admin"
+//   kSecAttrService = "io.shikki.admin" (W3.1 canonical product domain)
 //   kSecAttrAccount = <tag>
+//
+// W3.1 migration: legacyAdminService = "eu.fj-studios.shikki.admin" is preserved
+// as a constant for migration fallback. On first read failure under the canonical
+// service, storePrivateKey() tries the legacy service and migrates (mirrors
+// KeychainVaultCredentials.migrateLegacyIfPresent() pattern).
 // with kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly +
 // SecAccessControl(.biometryCurrentSet) — mirroring the existing
 // KeychainVaultCredentials pattern. The private key never leaves the
@@ -141,6 +146,13 @@ func ensureInteractive(_ args: CeremonyArguments) throws {
     }
 }
 
+/// Canonical admin Keychain service — W3.1 product-domain mandate.
+let canonicalAdminService = "io.shikki.admin"
+
+/// Legacy admin Keychain service — preserved for migration fallback only.
+/// DO NOT use for new writes. W3.1 migration from eu.fj-studios org namespace.
+let legacyAdminService = "eu.fj-studios.shikki.admin"
+
 func storePrivateKey(_ rawKey: Data, tag: String) throws {
     var cfError: Unmanaged<CFError>?
     let accessControl = SecAccessControlCreateWithFlags(
@@ -152,7 +164,7 @@ func storePrivateKey(_ rawKey: Data, tag: String) throws {
 
     var query: [CFString: Any] = [
         kSecClass:           kSecClassGenericPassword,
-        kSecAttrService:     "eu.fj-studios.shikki.admin" as CFString,
+        kSecAttrService:     canonicalAdminService as CFString,
         kSecAttrAccount:     tag as CFString,
         kSecValueData:       rawKey,
         kSecAttrAccessible:  kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
@@ -167,7 +179,7 @@ func storePrivateKey(_ rawKey: Data, tag: String) throws {
         // fully replaced (matches the KeychainVaultCredentials pattern).
         let deleteQuery: [CFString: Any] = [
             kSecClass:       kSecClassGenericPassword,
-            kSecAttrService: "eu.fj-studios.shikki.admin" as CFString,
+            kSecAttrService: canonicalAdminService as CFString,
             kSecAttrAccount: tag as CFString,
         ]
         SecItemDelete(deleteQuery as CFDictionary)
