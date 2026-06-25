@@ -56,11 +56,16 @@ public struct MachineAccountSeeder: Sendable {
         }
 
         // 3. Delegate the actual write to the existing VaultCredentialsSeeder.
+        //    v0.4.3 HIGH-2 fix: pass `boundSystemName: systemName` so the
+        //    credential blob carries the name it was provisioned for. Brokerd
+        //    boot uses SystemNameBindingVerifier to refuse start on
+        //    sidecar-vs-blob divergence (cache poisoning).
         let seeder = VaultCredentialsSeeder(store: store, verifier: nil)
         let seedResult = await seeder.seed(
             clientID: clientID,
             clientSecret: clientSecret,
             serverURL: serverURL,
+            boundSystemName: systemName,
             force: force,
             verify: false
         )
@@ -164,12 +169,36 @@ public struct LiveSystemNameWriter: SystemNameWriting {
             withIntermediateDirectories: true,
             attributes: [.posixPermissions: 0o700]
         )
-        try (systemName + "\n").write(toFile: path, atomically: true, encoding: .utf8)
-        // chmod 0600 — operator-readable, no group / world bits.
-        _ = try? FileManager.default.setAttributes(
-            [.posixPermissions: 0o600],
-            ofItemAtPath: path
-        )
+        // v0.4.3 MED-6 fix (@security panel): avoid the symlink race between
+        // createDirectory + write(toFile:atomically:) by using low-level
+        // open(2) with O_NOFOLLOW | O_CREAT | O_EXCL | O_WRONLY. This refuses
+        // to follow any pre-existing symlink at the target path AND fails
+        // if the file already exists (forcing the caller to handle replace
+        // explicitly). Mode 0o600 set at create time, not after.
+        let payload = (systemName + "\n").data(using: .utf8) ?? Data()
+        // Best-effort cleanup of any pre-existing entry (regular file OR
+        // symlink). We use unlink(2) which works on both; if it fails the
+        // open below will fail with EEXIST and we surface the error.
+        path.withCString { _ = unlink($0) }
+        let fd = path.withCString { cpath -> Int32 in
+            Darwin.open(cpath, O_NOFOLLOW | O_CREAT | O_EXCL | O_WRONLY, 0o600)
+        }
+        guard fd >= 0 else {
+            throw NSError(
+                domain: NSPOSIXErrorDomain, code: Int(errno),
+                userInfo: [NSLocalizedDescriptionKey: "open(O_NOFOLLOW|O_CREAT|O_EXCL) failed for \(path): errno=\(errno) (\(String(cString: strerror(errno))))"]
+            )
+        }
+        defer { close(fd) }
+        let written = payload.withUnsafeBytes { (buf: UnsafeRawBufferPointer) -> Int in
+            return Darwin.write(fd, buf.baseAddress, buf.count)
+        }
+        guard written == payload.count else {
+            throw NSError(
+                domain: NSPOSIXErrorDomain, code: Int(errno),
+                userInfo: [NSLocalizedDescriptionKey: "short write to \(path): wrote=\(written) expected=\(payload.count)"]
+            )
+        }
     }
 
     public func read() throws -> String? {

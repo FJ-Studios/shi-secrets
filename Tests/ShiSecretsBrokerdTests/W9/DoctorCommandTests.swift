@@ -32,6 +32,7 @@ final class RecordingController: BrokerdControlling, @unchecked Sendable {
         bootoutCalls.append((label, uid)); return 0
     }
     func socketExists(at path: String) -> Bool { false }
+    func kickstartValidate(label: String, uid: String) throws -> Int32 { 0 }
 }
 
 struct StubCodesignFake: CodesignVerifying {

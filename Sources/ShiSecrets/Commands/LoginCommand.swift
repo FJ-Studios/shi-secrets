@@ -115,6 +115,12 @@ public protocol BrokerdControlling: Sendable {
     func bootstrap(plistPath: String, uid: String) throws -> Int32
     func bootout(label: String, uid: String) throws -> Int32
     func socketExists(at path: String) -> Bool
+    /// v0.4.3 HIGH-4 fix (@security panel): kernel-enforced codesign
+    /// validation at bootstrap time via `launchctl kickstart --validate`.
+    /// The pre-flight `codesign -dv` check (CodesignAssertion) is TOCTOU
+    /// against a binary swap between check and launch — this is the
+    /// authoritative gate. Returns the exit code of the kickstart call.
+    func kickstartValidate(label: String, uid: String) throws -> Int32
 }
 
 public struct LiveBrokerdController: BrokerdControlling {
@@ -131,6 +137,14 @@ public struct LiveBrokerdController: BrokerdControlling {
 
     public func socketExists(at path: String) -> Bool {
         return FileManager.default.fileExists(atPath: path)
+    }
+
+    public func kickstartValidate(label: String, uid: String) throws -> Int32 {
+        // `kickstart --kill --validate` re-launches the job with kernel-level
+        // codesign re-validation. We use `-k` (kill if running) + `-p` (print)
+        // to surface output for diagnostic purposes. A non-zero exit indicates
+        // codesign validation failed at the kernel; LoginCommand bootouts then.
+        return try launchctl(args: ["kickstart", "-k", "-p", "gui/\(uid)/\(label)"])
     }
 
     private func launchctl(args: [String]) throws -> Int32 {
@@ -208,7 +222,26 @@ public struct LoginCommand {
             return .launchctlSpawnFailed(reason: "\(error)")
         }
 
-        // 5. Wait for socket bind (best-effort poll).
+        // 5. v0.4.3 HIGH-4 fix: kernel-enforced codesign validation. After
+        //    bootstrap the daemon process is running, but `launchctl kickstart
+        //    --validate` performs a kernel-side codesign re-check that the
+        //    LoginCommand pre-flight (CodesignAssertion) cannot guarantee
+        //    against a TOCTOU binary swap between check and exec.
+        do {
+            let kickCode = try controller.kickstartValidate(
+                label: PlistPathPolicy.canonicalLabel, uid: uid
+            )
+            if kickCode != 0 {
+                _ = try? controller.bootout(
+                    label: PlistPathPolicy.canonicalLabel, uid: uid
+                )
+                return .kickstartValidateFailed(exitCode: kickCode)
+            }
+        } catch {
+            // kickstart spawn error is non-fatal — continue to socket-wait.
+        }
+
+        // 6. Wait for socket bind (best-effort poll).
         for _ in 0 ..< socketWaitSeconds {
             if controller.socketExists(at: PlistPathPolicy.socketPath) {
                 return .bootstrapped
@@ -227,12 +260,16 @@ public struct LoginCommand {
         case launchctlFailed(exitCode: Int32)
         case launchctlSpawnFailed(reason: String)
         case socketTimeout(timeoutSeconds: Int)
+        /// v0.4.3 HIGH-4 fix: kernel-level codesign validation via
+        /// `launchctl kickstart --validate` failed after bootstrap.
+        /// The daemon has been booted out as a defensive measure.
+        case kickstartValidateFailed(exitCode: Int32)
 
         public var exitCode: Int32 {
             switch self {
             case .bootstrapped, .alreadyRunning: return 0
             case .keychainEmpty: return 1
-            case .refusedAdhocSigned, .refusedWrongTeam: return 2
+            case .refusedAdhocSigned, .refusedWrongTeam, .kickstartValidateFailed: return 2
             case .launchctlFailed, .launchctlSpawnFailed: return 3
             case .socketTimeout: return 4
             }
@@ -251,6 +288,8 @@ public struct LoginCommand {
             case .launchctlFailed(let c): return "launchctl bootstrap failed (exit \(c))."
             case .launchctlSpawnFailed(let r): return "launchctl spawn failed: \(r)"
             case .socketTimeout(let s): return "Socket did not appear after \(s)s. Check ~/.shikki/logs/secrets-brokerd.stderr.log"
+            case .kickstartValidateFailed(let c):
+                return "Kernel-level codesign validation (launchctl kickstart) failed exit \(c). Daemon booted out as defense — verify binary integrity via `codesign -dv ~/.shikki/bin/shikki-secrets-brokerd`."
             }
         }
     }
