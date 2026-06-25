@@ -272,7 +272,14 @@ public actor BrokerDaemon {
     // MARK: - handleRequest
 
     /// Orchestrates a single request: scope → minter → audit → response.
-    /// Returns `.ephemeralToken(SBT)` on success, `.deny(reason)` on refusal.
+    ///
+    /// Caller-type dispatch (W4.2 — BR-H-01):
+    ///   • local-unix + !llm_touched → `.boundPlaintext(jti, plaintext)`
+    ///     The jti comes from the freshly-minted token; the plaintext is
+    ///     fetched from the vault under the secret name derived from scope.
+    ///     The same jti is in the audit allow row written before the vault
+    ///     fetch (T02 invariant).
+    ///   • MCP / llm_touched → `.ephemeralToken(SBT)` (existing behavior)
     ///
     /// Fail-closed audit (review finding #1 — hardens BR-G-01): if the
     /// audit append throws, the request is refused with
@@ -415,6 +422,27 @@ public actor BrokerDaemon {
                 now: now, reason: .brokerSessionInvalid
             ) { return resp }
             return .deny(.brokerSessionInvalid)
+        }
+
+        // W4.2 — caller-type dispatch (BR-H-01).
+        // Local unix callers that are NOT llm-touched get the plaintext back
+        // (bound to the jti from the minted token). MCP / llm-touched callers
+        // always get the safer ephemeralToken path.
+        //
+        // Note: never log plaintext (ShikkiSecretsLogger / BR-G-01).
+        let jti = prepared.token.claims.jti
+        if wrapped.transport == .unix && !wrapped.llmTouched {
+            let secretName = deriveSecretName(from: request.scope)
+            do {
+                let fields = try await bwClient.get(name: secretName)
+                if let plaintext = fields["value"], !plaintext.isEmpty {
+                    return .boundPlaintext(jti: jti, plaintext: plaintext)
+                }
+                // Vault entry missing or empty field — fall through to token.
+            } catch {
+                // Vault unavailable — fall through to token path so callers
+                // can still obtain a token for async re-fetch via MCP.
+            }
         }
 
         return .ephemeralToken(ShikkiSBT(claims: prepared.token.claims))
