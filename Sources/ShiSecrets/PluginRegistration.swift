@@ -28,6 +28,7 @@ public struct ShiSecretsPlugin: PluginCLISurface {
         "setup",           // W3.1: `shi secrets setup vault-credentials` + W6 `shi secrets setup wizard`
         "login",           // W7: bootstrap canonical brokerd plist
         "logout",          // W7: bootout all labels + archive stale plists
+        "status",          // W8: one-line health (exit 0/1/2)
     ]
 
     /// Dispatch entry-point called by shikki-cli for `shi secrets <subVerb> [args...]`.
@@ -161,6 +162,8 @@ public struct ShiSecretsPlugin: PluginCLISurface {
             return await runLogin(args: args)
         case "logout":
             return runLogout(args: args)
+        case "status":
+            return runStatus(args: args)
 
         case "setup":
             // `shi secrets setup wizard [flags]`            — W6 one-click bootstrap
@@ -377,6 +380,32 @@ public struct ShiSecretsPlugin: PluginCLISurface {
         let outcome = await cmd.run()
         fputs("\(outcome.operatorMessage)\n", outcome.exitCode == 0 ? stdout : stderr)
         return outcome.exitCode
+    }
+
+    // MARK: - W8 status
+
+    private static func runStatus(args: [String]) -> Int32 {
+        if args.contains("--help") || args.contains("-h") {
+            fputs(
+                """
+                OVERVIEW: One-line vault-system health. Exit 0 (green) / 1 (yellow) / 2 (red).
+
+                USAGE: shi secrets status [--json]
+
+                """,
+                stderr
+            )
+            return 0
+        }
+        let probe: BrokerdProbing = LiveBrokerdProbe()
+        let cmd = StatusCommand(probe: probe)
+        let s = cmd.snapshot()
+        if args.contains("--json") {
+            print(StatusCommand.renderJSON(s))
+        } else {
+            print(StatusCommand.render(s))
+        }
+        return s.overall.exitCode
     }
 
     private static func runLogout(args: [String]) -> Int32 {
