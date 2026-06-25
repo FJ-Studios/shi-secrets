@@ -425,12 +425,15 @@ public struct ShiSecretsPlugin: PluginCLISurface {
             return 0
         }
         let outcome = LogoutCommand().run()
-        if case .completed(let attempts, let archived) = outcome {
+        if case .completed(let attempts, let archived, let spawnErrors) = outcome {
             for (label, code) in attempts {
                 print("bootout \(label): exit \(code)")
             }
             for path in archived {
                 print("archived stale: \(path)")
+            }
+            for err in spawnErrors {
+                fputs("spawn error: \(err)\n", stderr)
             }
         }
         return outcome.exitCode

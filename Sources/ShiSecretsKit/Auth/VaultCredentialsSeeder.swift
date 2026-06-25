@@ -98,8 +98,15 @@ public struct VaultCredentialsSeeder: Sendable {
         verify: Bool
     ) async -> SeedResult {
 
-        // Validate clientID format
-        guard clientID.hasPrefix("user."), clientID.count > 5 else {
+        // CRIT-2 fix: accept BOTH `user.` (personal API key, full-vault access)
+        // AND `machine.` (Bitwarden Secrets Manager machine_account, scoped).
+        // The W6.5c spec prefers `machine.` for blast-radius isolation but
+        // Vaultwarden's Secrets Manager API is stub-only as of mid-2026, so
+        // `user.` is the working today-path. Both are validated here; the
+        // wizard surfaces a WARN when a `user.` key is detected.
+        let isUserKey = clientID.hasPrefix("user.")
+        let isMachineKey = clientID.hasPrefix("machine.")
+        guard (isUserKey || isMachineKey), clientID.count > 6 else {
             return .invalidClientID(clientID)
         }
 

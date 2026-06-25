@@ -164,8 +164,15 @@ public struct SecretsSetupWizardCommand {
             }
             cid = line.trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        guard cid.hasPrefix("user.") else {
+        // CRIT-2 fix: accept BOTH `user.` and `machine.` prefixes (see
+        // VaultCredentialsSeeder.seed for rationale).
+        guard cid.hasPrefix("user.") || cid.hasPrefix("machine.") else {
             return .failure(.invalidClientID(cid))
+        }
+        if cid.hasPrefix("user.") {
+            FileHandle.standardError.write(Data(
+                "⚠  WARN: client_id starts with 'user.' — this is a personal Bitwarden API key (full-vault access). For blast-radius isolation prefer machine.* when available.\n".utf8
+            ))
         }
 
         // client_secret: --client-secret flag (- = stdin) → prompt no-echo
@@ -177,6 +184,12 @@ public struct SecretsSetupWizardCommand {
                 }
                 cs = line
             } else {
+                // MED-5 fix (@security panel): command-line secret is visible
+                // in `ps aux`, shell history, and process environment. Warn
+                // loudly and recommend stdin pipe (--client-secret -).
+                FileHandle.standardError.write(Data(
+                    "⚠  WARN: --client-secret literal exposes the secret in shell history + ps output. Prefer --client-secret - (stdin pipe) or omit (no-echo prompt).\n".utf8
+                ))
                 cs = arg
             }
         } else {
@@ -218,9 +231,10 @@ public struct SecretsSetupWizardCommand {
                                     arguments: ["bootout", "gui/\(uid)/io.shikki.secrets-brokerd"])
         _ = try? processRunner.run(executable: "/bin/launchctl",
                                     arguments: ["bootout", "gui/\(uid)/eu.fj-studios.shikki.secrets-brokerd"])
-        // Kill any leftover process.
-        _ = try? processRunner.run(executable: "/usr/bin/pkill",
-                                    arguments: ["-9", "-f", "shikki-secrets-brokerd"])
+        // HIGH-1 fix (@security panel): `pkill -f` matches any process whose
+        // argv contains the string, including malicious paths like
+        // /tmp/evil-shikki-secrets-brokerd. The launchctl bootout above is
+        // sufficient for graceful shutdown. Removed `pkill -9 -f`.
         Thread.sleep(forTimeInterval: 1)
         // Remove stale socket.
         let sockPath = NSString(string: "~/.shikki/run/secrets-brokerd.sock").expandingTildeInPath

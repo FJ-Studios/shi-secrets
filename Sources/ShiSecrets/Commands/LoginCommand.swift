@@ -63,6 +63,19 @@ public struct LiveCodesignVerifier: CodesignVerifying {
         task.standardError = err
         task.standardOutput = Pipe()
         do { try task.run() } catch { return nil }
+        // MED-7 fix (@security panel): codesign may contact OCSP servers and
+        // hang for up to 30s on network-unreachable machines. Cap at 5s with
+        // a watchdog timer; if the subprocess hasn't exited by then, kill it
+        // and return nil (caller treats as adhoc-signed).
+        let deadline = Date().addingTimeInterval(5)
+        while task.isRunning && Date() < deadline {
+            Thread.sleep(forTimeInterval: 0.1)
+        }
+        if task.isRunning {
+            kill(task.processIdentifier, SIGKILL)
+            task.waitUntilExit()
+            return nil
+        }
         task.waitUntilExit()
         let raw = String(data: err.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
         // Lines look like `TeamIdentifier=SH7MZH647S` or `TeamIdentifier=not set`.
@@ -266,19 +279,27 @@ public struct LogoutCommand {
 
     public func run(uid: String = String(getuid())) -> Outcome {
         var bootoutAttempts: [String: Int32] = [:]
+        // LOW-4 fix (@security panel): surface launchctl spawn errors instead
+        // of silently swallowing them (was masking "launchctl not on PATH"
+        // or "binary path wrong" failures as success).
+        var spawnErrors: [String] = []
 
         // Canonical bootout (lessons-learned: idempotent — ignore "not loaded").
         do {
             let code = try controller.bootout(label: PlistPathPolicy.canonicalLabel, uid: uid)
             bootoutAttempts[PlistPathPolicy.canonicalLabel] = code
-        } catch { /* swallow spawn errors */ }
+        } catch {
+            spawnErrors.append("bootout \(PlistPathPolicy.canonicalLabel): \(error)")
+        }
 
         // Legacy labels (guard rail #4).
         for legacy in PlistPathPolicy.legacyLabels {
             do {
                 let code = try controller.bootout(label: legacy, uid: uid)
                 bootoutAttempts[legacy] = code
-            } catch { /* swallow */ }
+            } catch {
+                spawnErrors.append("bootout \(legacy): \(error)")
+            }
         }
 
         // Archive stale plists at non-canonical paths.
@@ -289,7 +310,7 @@ public struct LogoutCommand {
             if let archivedPath = archivedPath { archived.append(archivedPath) }
         }
 
-        return .completed(bootoutAttempts: bootoutAttempts, archivedPaths: archived)
+        return .completed(bootoutAttempts: bootoutAttempts, archivedPaths: archived, spawnErrors: spawnErrors)
     }
 
     private func isoStamp(_ date: Date) -> String {
@@ -299,7 +320,7 @@ public struct LogoutCommand {
     }
 
     public enum Outcome: Sendable, Equatable {
-        case completed(bootoutAttempts: [String: Int32], archivedPaths: [String])
+        case completed(bootoutAttempts: [String: Int32], archivedPaths: [String], spawnErrors: [String])
 
         public var exitCode: Int32 { 0 }
     }

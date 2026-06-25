@@ -88,7 +88,7 @@ public struct MachineAccountSeeder: Sendable {
 
     // MARK: - Outcome
 
-    public enum Outcome: Sendable {
+    public enum Outcome: Sendable, Equatable {
         case seeded(systemName: String, clientIDPrefix: String)
         case alreadyExists
         case invalidSystemName(reason: SystemNamePolicy.ValidationError)
@@ -119,8 +119,14 @@ public struct MachineAccountSeeder: Sendable {
         }
     }
 
-    func passwordGrantSmell(clientID: String, clientSecret: String) -> PasswordGrantSmell? {
-        if clientSecret.contains(" ") || clientSecret.contains("\t") {
+    /// LOW-1 fix: made `public` so external test targets can verify the
+    /// regression-guard heuristics without needing `@testable import`.
+    public func passwordGrantSmell(clientID: String, clientSecret: String) -> PasswordGrantSmell? {
+        // MED-2 fix: catch ALL Unicode whitespace categories (non-breaking
+        // space, zero-width, BOM, tabs, newlines) — not just ASCII space + tab.
+        if clientSecret.unicodeScalars.contains(where: { $0.properties.isWhitespace })
+            || clientSecret.unicodeScalars.contains(where: { $0 == "\u{FEFF}" || $0 == "\u{200B}" || $0 == "\u{200C}" || $0 == "\u{200D}" })
+        {
             return .clientSecretContainsWhitespace
         }
         if clientID.contains("@") && !clientID.hasPrefix("user.") && !clientID.hasPrefix("machine.") {

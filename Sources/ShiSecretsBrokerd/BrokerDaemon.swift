@@ -98,6 +98,12 @@ public actor BrokerDaemon {
     public let engine: RotationEngine
     public let manifestStore: ManifestStore
     public let scopeValidator: ScopeValidator
+    /// Per-system blast-radius isolation (W6.5c F-PSA-3, CRIT-1 fix
+    /// 2026-06-25). Wires `ScopePolicy.canRead(path:)` into the request
+    /// path so a brokerd install reads ONLY `shi/system/<self>/**` +
+    /// `shi/shared/**`. `nil` disables the secondary check (Wave-4 tests
+    /// + Linux nodes pre-W6.5c). Production wiring required.
+    public let systemScopePolicy: ScopePolicy?
     public let bridge: MCPBridge
     public let socket: UnixSocketServer
     public let bwClient: any BWClient
@@ -139,6 +145,7 @@ public actor BrokerDaemon {
         engine: RotationEngine,
         manifestStore: ManifestStore,
         scopeValidator: ScopeValidator,
+        systemScopePolicy: ScopePolicy? = nil,
         bridge: MCPBridge,
         socket: UnixSocketServer,
         bwClient: any BWClient,
@@ -158,6 +165,7 @@ public actor BrokerDaemon {
         self.engine = engine
         self.manifestStore = manifestStore
         self.scopeValidator = scopeValidator
+        self.systemScopePolicy = systemScopePolicy
         self.bridge = bridge
         self.socket = socket
         self.bwClient = bwClient
@@ -318,6 +326,19 @@ public actor BrokerDaemon {
                 now: now, reason: .scopeDenied
             ) { return resp }
             return .deny(.scopeDenied)
+        }
+
+        // W6.5c CRIT-1 fix: secondary blast-radius enforcement via
+        // per-system ScopePolicy. The toml allowlist (ScopeValidator above)
+        // can be operator-misconfigured; this check is the architectural
+        // guarantee that a compromised brokerd cannot read another system's
+        // collection even if the allowlist accidentally permits it.
+        if let policy = systemScopePolicy, !policy.canRead(path: request.scope) {
+            if let resp = await writeDenyOrFailClosed(
+                jti: "unminted", request: request, wrapped: wrapped,
+                now: now, reason: .scopePatternDenied
+            ) { return resp }
+            return .deny(.scopePatternDenied)
         }
 
         // BWClient session must still be valid — BR-F-07. Review finding #3:

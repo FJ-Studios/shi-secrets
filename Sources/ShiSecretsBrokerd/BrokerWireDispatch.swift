@@ -79,9 +79,14 @@ public actor BrokerWireDispatcher {
                 // Try Shape B: { name: String } — translate to canonical form.
                 struct NameOnlyParams: Decodable { let name: String }
                 let nameParams = try decodeParams(NameOnlyParams.self, from: request.params)
-                // Map name → scope (the secret name IS the scope path in the broker model).
+                // HIGH-5 fix (@security panel): derive `sub` from the kernel-
+                // reported peer credentials (uid + getpwuid), NOT from the
+                // attacker-controlled USER environment variable. Mismatched
+                // env spoofs the audit row's `sub` while uid remains correct;
+                // this closes that audit-log spoofing vector.
+                let subFromPeer = Self.usernameFromPeerUid(peerUid)
                 params = SecretGetParams(
-                    sub: ProcessInfo.processInfo.environment["USER"] ?? NSUserName(),
+                    sub: subFromPeer,
                     scope: nameParams.name,
                     op: .read,
                     ttl: 300,
@@ -344,6 +349,15 @@ public actor BrokerWireDispatcher {
             self.toolName = toolName
             self.name = name
         }
+    }
+
+    /// HIGH-5 helper (@security panel): resolve a username from a kernel-
+    /// reported peer UID via `getpwuid(3)`. Used to fill `sub` in Shape B
+    /// requests so the audit row is not spoofable via the USER env var.
+    /// Returns `"uid:<n>"` if `getpwuid` fails (containers without passwd).
+    static func usernameFromPeerUid(_ uid: UInt32) -> String {
+        guard let pw = getpwuid(uid_t(uid)) else { return "uid:\(uid)" }
+        return String(cString: pw.pointee.pw_name)
     }
 
     /// Decode a typed params struct from a JSONValue tree by re-encoding

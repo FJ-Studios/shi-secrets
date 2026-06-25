@@ -97,9 +97,13 @@ struct SystemNamePolicyDefaultTests {
         #expect(d.hasSuffix("-shikki"))
     }
 
-    @Test("empty hostname falls back to 'shikki'")
+    @Test("empty hostname falls back to 'shikki-<uuid>' (MED-3 collision avoidance)")
     func emptyHostnameFallback() {
         let d = SystemNamePolicy.defaultName(hostname: "")
-        #expect(d == "shikki")
+        #expect(d.hasPrefix("shikki-"))
+        #expect(d.count > "shikki-".count)
+        // Two consecutive empty-hostname derivations must differ (collision avoided).
+        let d2 = SystemNamePolicy.defaultName(hostname: "")
+        #expect(d != d2)
     }
 }

@@ -49,11 +49,12 @@ struct SigilEmitTests {
         #expect(env.tokenReference == "jti-123")
         #expect(env.hankoJWTProof == "signed.jwt.proof")
         #expect(env.machineIDEmitting == "A")
-        #expect(env.expiresAt == now.addingTimeInterval(3600))
+        // CRIT-3 fix: default TTL is now 300s (was 3600s).
+        #expect(env.expiresAt == now.addingTimeInterval(300))
     }
 
-    @Test("default TTL is 3600s; custom ttl honored (T-W10-03)")
-    func customTTL() {
+    @Test("default TTL is 300s; custom ttl below cap honored (T-W10-03)")
+    func customTTLBelowCap() {
         let now = Date(timeIntervalSince1970: 1_700_000_000)
         let exchange = HankoSigilExchange(
             broker: FakeHankoBroker(token: HankoMintedToken(token: "x", expiresAt: now, boundToMachineID: "B")),
@@ -64,9 +65,26 @@ struct SigilEmitTests {
             tokenReference: "r",
             hankoJWTProof: "p",
             machineIDEmitting: "A",
-            ttlSeconds: 1800
+            ttlSeconds: 120
         )
-        #expect(env.expiresAt == now.addingTimeInterval(1800))
+        #expect(env.expiresAt == now.addingTimeInterval(120))
+    }
+
+    @Test("CRIT-3: TTL above envelopeMaxTTLSeconds is capped at 300s")
+    func ttlCapEnforced() {
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let exchange = HankoSigilExchange(
+            broker: FakeHankoBroker(token: HankoMintedToken(token: "x", expiresAt: now, boundToMachineID: "B")),
+            nowProvider: { now }
+        )
+        let env = exchange.emit(
+            vaultURL: "https://x",
+            tokenReference: "r",
+            hankoJWTProof: "p",
+            machineIDEmitting: "A",
+            ttlSeconds: 3600     // requested 1h, must be capped at 300s
+        )
+        #expect(env.expiresAt == now.addingTimeInterval(300))
     }
 
     @Test("envelope encoded as JSON has NO cached_token field (T-W10-06 regression)")

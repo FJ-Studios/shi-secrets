@@ -253,7 +253,7 @@ struct LogoutCommandTests {
             nowProvider: { Date(timeIntervalSince1970: 1_700_000_000) }
         )
         let outcome = cmd.run(uid: "501")
-        if case .completed(_, let archived) = outcome {
+        if case .completed(_, let archived, _) = outcome {
             #expect(archived.count == 2)
             for a in archived { #expect(a.contains(".RETIRED-")) }
         } else { Issue.record("expected .completed") }
