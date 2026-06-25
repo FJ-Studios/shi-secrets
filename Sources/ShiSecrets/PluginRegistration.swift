@@ -156,27 +156,30 @@ public struct ShiSecretsPlugin: PluginCLISurface {
             return try await SecretsBrokerdCommand(action: action).run()
 
         case "setup":
-            // `shi secrets setup vault-credentials [flags]` — W3.1
+            // `shi secrets setup wizard [flags]`            — W6 one-click bootstrap
+            // `shi secrets setup vault-credentials [flags]` — W3.1 seed-only verb
             // `shi secrets setup install` — install launchd plist (referenced in error messages)
             guard let subAction = args.first else {
-                fputs("Usage: shi secrets setup <vault-credentials|install> [flags]\n", stderr)
+                fputs("Usage: shi secrets setup <wizard|vault-credentials|install> [flags]\n", stderr)
                 return 1
             }
             switch subAction {
+            case "wizard":
+                return await runSetupWizard(args: Array(args.dropFirst()))
             case "vault-credentials":
                 return await runSetupVaultCredentials(args: Array(args.dropFirst()))
             case "install":
-                // TODO W4: install the launchd plist. For now, surface a clear message.
                 fputs(
                     """
-                    shi secrets setup install: not yet implemented in this binary.
-                    Run the install script manually or use `shi pickup shi-secrets`.
+                    shi secrets setup install: superseded by `shi secrets setup wizard`.
+                    The wizard handles plist bootstrap + Keychain seed + socket-wait + smoke
+                    end-to-end. Re-run as: shi secrets setup wizard
                     """,
                     stderr
                 )
                 return 1
             default:
-                fputs("Unknown setup sub-action: \(subAction). Try: vault-credentials, install\n", stderr)
+                fputs("Unknown setup sub-action: \(subAction). Try: wizard, vault-credentials, install\n", stderr)
                 return 1
             }
 
@@ -260,6 +263,77 @@ public struct ShiSecretsPlugin: PluginCLISurface {
                                            Pass "-" to read a single line from stdin.
               --force                      Overwrite an existing Keychain entry.
               --no-verify                  Skip the OAuth round-trip verification.
+              --help                       Show this help.
+
+            """,
+            stderr
+        )
+    }
+
+    // MARK: - setup wizard helper (W6 — one-click bootstrap)
+
+    private static func runSetupWizard(args: [String]) async -> Int32 {
+        var clientID: String? = nil
+        var serverURL: String = "https://vw.obyw.one"
+        var clientSecretArg: String? = nil
+        var force = false
+        var socketWaitSeconds: Int = 30
+        var skipSmoke = false
+
+        var i = 0
+        while i < args.count {
+            switch args[i] {
+            case "--client-id":
+                i += 1; if i < args.count { clientID = args[i] }
+            case "--server-url":
+                i += 1; if i < args.count { serverURL = args[i] }
+            case "--client-secret":
+                i += 1; if i < args.count { clientSecretArg = args[i] }
+            case "--force":
+                force = true
+            case "--socket-wait":
+                i += 1; if i < args.count, let n = Int(args[i]) { socketWaitSeconds = n }
+            case "--skip-smoke":
+                skipSmoke = true
+            case "--help", "-h":
+                printSetupWizardHelp()
+                return 0
+            default:
+                fputs("Unknown flag: \(args[i])\n", stderr)
+                printSetupWizardHelp()
+                return 1
+            }
+            i += 1
+        }
+
+        let cmd = SecretsSetupWizardCommand(
+            clientID: clientID,
+            serverURL: serverURL,
+            clientSecretArg: clientSecretArg,
+            force: force,
+            socketWaitSeconds: socketWaitSeconds,
+            skipSmoke: skipSmoke
+        )
+        return await cmd.run()
+    }
+
+    private static func printSetupWizardHelp() {
+        fputs(
+            """
+            OVERVIEW: One-click vault setup — collect credentials, seed Keychain, bootstrap
+            launchd plist, wait for socket, smoke-test set/get round-trip. Wraps the
+            full bash-bootstrap pipeline in a single typed command.
+
+            USAGE: shi secrets setup wizard [flags]
+
+            FLAGS:
+              --client-id <user.UUID>      Optional. Prompted if omitted.
+              --server-url <https://...>   Optional. Defaults to https://vw.obyw.one.
+              --client-secret <secret>     Optional. Prompted with no-echo if omitted.
+                                           Pass "-" to read a single line from stdin.
+              --force                      Overwrite an existing Keychain entry.
+              --socket-wait <seconds>      Seconds to wait for brokerd socket. Default: 30.
+              --skip-smoke                 Skip the set/get round-trip after launchd bootstrap.
               --help                       Show this help.
 
             """,
