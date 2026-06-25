@@ -74,7 +74,18 @@ public actor BrokerWireDispatcher {
         do {
             // Try Shape A first (full canonical params).
             if let canonical = try? decodeParams(SecretGetParams.self, from: request.params) {
-                params = canonical
+                // v0.4.2 @sensei HIGH fix: even Shape A's `sub` field is
+                // attacker-controlled JSON. Override with kernel-peer-uid
+                // resolution so audit rows always reflect the actual caller.
+                let trustedSub = Self.usernameFromPeerUid(peerUid)
+                params = SecretGetParams(
+                    sub: trustedSub,
+                    scope: canonical.scope,
+                    op: canonical.op,
+                    ttl: canonical.ttl,
+                    toolName: canonical.toolName,
+                    name: canonical.name
+                )
             } else {
                 // Try Shape B: { name: String } — translate to canonical form.
                 struct NameOnlyParams: Decodable { let name: String }
@@ -187,6 +198,16 @@ public actor BrokerWireDispatcher {
                 message: "Invalid params for secret.set: \(error)"
             ))
         }
+        // v0.4.2 @ronin FINDING-1 fix: enforce ScopePolicy on write paths
+        // (secret.set bypassed BrokerDaemon.handleRequest where v0.4.1 wired
+        // the policy). Without this check a local-uid peer could write keys
+        // under another system's blast-radius scope.
+        if let policy = daemon.systemScopePolicy, !policy.canRead(path: params.name) {
+            return WireResponse(id: request.id, error: WireError(
+                code: WireErrorCode.invalidParams,
+                message: "secret.set denied — path outside this system's blast-radius scope (W6.5c F-PSA-3)"
+            ))
+        }
         do {
             try await daemon.bwClient.set(name: params.name, value: params.value)
             // CRIT-2: audit every mutation.
@@ -229,12 +250,19 @@ public actor BrokerWireDispatcher {
         do {
             let names = try await daemon.bwClient.list()
             // Apply optional prefix glob filter (v1: prefix match).
-            let filtered: [String]
+            var filtered: [String]
             if let f = filter, !f.isEmpty {
                 let prefix = f.hasSuffix("*") ? String(f.dropLast()) : f
                 filtered = names.filter { $0.hasPrefix(prefix) }
             } else {
                 filtered = names
+            }
+            // v0.4.2 @ronin FINDING-1 fix: enforce ScopePolicy on the list
+            // response. Without this filter a local-uid peer could enumerate
+            // every collection name in the vault, leaking which keys other
+            // systems hold under their blast-radius scopes.
+            if let policy = daemon.systemScopePolicy {
+                filtered = filtered.filter { policy.canRead(path: $0) }
             }
             // Bug 2 fix: return [VaultEntryRef] shaped objects instead of raw
             // [String] names. ProductionBrokerClient.list() decodes [VaultEntryRef]
@@ -301,6 +329,13 @@ public actor BrokerWireDispatcher {
                 message: "Invalid params for secret.delete: \(error)"
             ))
         }
+        // v0.4.2 @ronin FINDING-1 fix: enforce ScopePolicy on delete paths.
+        if let policy = daemon.systemScopePolicy, !policy.canRead(path: params.name) {
+            return WireResponse(id: request.id, error: WireError(
+                code: WireErrorCode.invalidParams,
+                message: "secret.delete denied — path outside this system's blast-radius scope (W6.5c F-PSA-3)"
+            ))
+        }
         do {
             try await daemon.bwClient.delete(name: params.name)
             // CRIT-2: audit every mutation.
@@ -352,12 +387,29 @@ public actor BrokerWireDispatcher {
     }
 
     /// HIGH-5 helper (@security panel): resolve a username from a kernel-
-    /// reported peer UID via `getpwuid(3)`. Used to fill `sub` in Shape B
-    /// requests so the audit row is not spoofable via the USER env var.
-    /// Returns `"uid:<n>"` if `getpwuid` fails (containers without passwd).
+    /// reported peer UID via `getpwuid_r(3)` (reentrant variant).
+    /// v0.4.2 fixes:
+    /// - @tech-expert: replaced `getpwuid` (POSIX static buffer) with
+    ///   `getpwuid_r` for thread-safety in actor concurrency.
+    /// - @ronin FINDING-4: bound returned name to 64 bytes + strip
+    ///   non-printable characters to prevent audit-log injection via
+    ///   crafted passwd entries.
     static func usernameFromPeerUid(_ uid: UInt32) -> String {
-        guard let pw = getpwuid(uid_t(uid)) else { return "uid:\(uid)" }
-        return String(cString: pw.pointee.pw_name)
+        var pwd = passwd()
+        var buf = [CChar](repeating: 0, count: 1024)
+        var result: UnsafeMutablePointer<passwd>? = nil
+        let rc = buf.withUnsafeMutableBufferPointer { ptr -> Int32 in
+            getpwuid_r(uid_t(uid), &pwd, ptr.baseAddress, ptr.count, &result)
+        }
+        guard rc == 0, result != nil else { return "uid:\(uid)" }
+        let raw = String(cString: pwd.pw_name)
+        // Strip non-printable + cap at 64 bytes for safe audit rendering.
+        let sanitized = raw.unicodeScalars
+            .filter { $0.value >= 0x20 && $0.value < 0x7F }
+            .prefix(64)
+            .map { String($0) }
+            .joined()
+        return sanitized.isEmpty ? "uid:\(uid)" : sanitized
     }
 
     /// Decode a typed params struct from a JSONValue tree by re-encoding

@@ -115,12 +115,15 @@ struct SigilEmitTests {
 @Suite("W10 HankoSigilExchange.redeem — outcomes")
 struct SigilRedeemTests {
 
+    // v0.4.2 @ronin FINDING-3 fix updated: redeem() now enforces the 300s
+    // envelope-TTL cap. Test fixture's expiresAt must be within 300s of the
+    // test's `now` (1_700_000_000 + 60), so we set expiresAt to base + 200s.
     static let validEnvelope: SigilEnvelope = {
         SigilEnvelope(
             sigilID: "uid",
             vaultURL: "https://vw.obyw.one",
             tokenReference: "ref",
-            expiresAt: Date(timeIntervalSince1970: 1_700_000_000 + 3600),
+            expiresAt: Date(timeIntervalSince1970: 1_700_000_000 + 200),
             hankoJWTProof: "p",
             machineIDEmitting: "A"
         )

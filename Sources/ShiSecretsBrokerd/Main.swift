@@ -137,9 +137,20 @@ struct BrokerMain {
             log("shikki-secrets-brokerd: WARN scope allowlist is \"**\" — DEV ONLY. Configure ~/.shikki/settings/secrets-brokerd.toml [scope].allowlist for production (e.g. allowlist = [\"shi/**\", \"ci/**\"])")
         }
         // HIGH-6 fix: refuse start with empty allowlist (silent DoS fingerprint).
+        // v0.4.2 @kintsugi UX-F fix: the error message now provides the
+        // exact TOML stanza an operator should paste, not just a hint.
         if brokerdSettings.scopeAllowlist.isEmpty {
             FileHandle.standardError.write(Data(
-                "shikki-secrets-brokerd: ERROR scope allowlist is empty — refusing to start. Configure ~/.shikki/settings/secrets-brokerd.toml [scope].allowlist with at least one pattern (e.g. allowlist = [\"shi/**\"]).\n".utf8
+                """
+                shikki-secrets-brokerd: ERROR scope allowlist is empty — refusing to start.
+                Edit ~/.shikki/settings/secrets-brokerd.toml and add:
+
+                    [scope]
+                    allowlist = ["shi/**"]
+
+                Then re-run `shi secrets login`.
+
+                """.utf8
             ))
             exit(78)
         }

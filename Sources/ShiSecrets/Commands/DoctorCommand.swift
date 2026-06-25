@@ -156,7 +156,7 @@ public struct DoctorCheckOrphanedSocket: DoctorCheck {
         // started and bound the socket; we'd otherwise unlink a live socket
         // and cause a denial-of-service.
         if !probe.pids().isEmpty {
-            return .refused(reason: "brokerd PID appeared between detect and fix — not removing live socket")
+            return .refused(reason: "brokerd PID appeared between detect and fix — not removing live socket. Run `shi secrets status` to confirm the daemon is healthy; if it is, no fix is needed. If status still reports an orphaned socket, re-run `shi secrets doctor --fix`.")
         }
         guard FileManager.default.fileExists(atPath: socketPath) else {
             return .noop

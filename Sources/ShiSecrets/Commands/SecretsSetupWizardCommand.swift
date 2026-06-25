@@ -318,7 +318,7 @@ public enum WizardError: Error, Sendable, Equatable {
     public var message: String {
         switch self {
         case .missingInput(let f): return "missing input: \(f)"
-        case .invalidClientID(let s): return "invalid client_id (must start with user.): \(s)"
+        case .invalidClientID(let s): return "invalid client_id (must start with user. or machine.): \(s)"
         case .invalidServerURL(let s): return "invalid server_url: \(s)"
         case .keychainOSError(let st): return "Keychain OSStatus \(st)"
         case .seederFailed(let m): return "seeder failed: \(m)"
@@ -334,7 +334,7 @@ public enum WizardError: Error, Sendable, Equatable {
     public var hint: String? {
         switch self {
         case .missingInput: return "re-run and provide the prompted value"
-        case .invalidClientID: return "Bitwarden API key starts with 'user.' — copy from Settings → Security → Keys → API Key"
+        case .invalidClientID: return "Bitwarden API key starts with 'user.' (personal full-vault) or 'machine.' (scoped service account) — copy from Settings → Security → Keys → API Key"
         case .invalidServerURL: return "must start with https:// or http:// (e.g. https://vw.obyw.one)"
         case .keychainOSError(let st) where st == -25300: return "errSecItemNotFound — re-run with --force"
         case .keychainOSError: return "check Keychain Access.app for the io.shikki.vault entry"

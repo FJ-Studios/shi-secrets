@@ -73,7 +73,13 @@ struct NoAdHocSchedulerTests {
         // SessionCache uses Task.sleep for Vaultwarden OAuth token refresh
         // scheduling (not the rotation cron) — excluded pending kernel-based
         // refresh job (tracked: BR-SM-10 kernel migration).
-        let allowlisted: Set<String> = ["SessionCache.swift"]
+        //
+        // LoginCommand uses Task.sleep for ONE-SHOT socket-wait polling after
+        // `launchctl bootstrap` (W7); it is not a scheduler — it polls for
+        // <=10s for the brokerd unix socket to appear and exits. The test's
+        // intent is "no ad-hoc rotation/cron primitives"; a bounded
+        // one-shot poll for a foreign-system file does not violate it.
+        let allowlisted: Set<String> = ["SessionCache.swift", "LoginCommand.swift"]
 
         var violations: [(URL, String)] = []
         for url in scanned {
