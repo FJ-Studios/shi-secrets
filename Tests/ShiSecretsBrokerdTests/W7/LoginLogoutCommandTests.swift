@@ -49,6 +49,11 @@ actor RecordingBrokerdController: BrokerdControlling {
         return 0
     }
 
+    nonisolated func kickstartValidate(label: String, uid: String) throws -> Int32 {
+        _kickstartLog.value.append((label, uid))
+        return _nextKickstartExit.value
+    }
+
     // Plain wrapper boxes so the protocol's nonisolated methods can mutate.
     final class Box<T>: @unchecked Sendable {
         var value: T
@@ -59,6 +64,8 @@ actor RecordingBrokerdController: BrokerdControlling {
     nonisolated let _nextBootstrapExit = Box(Int32(0))
     nonisolated let _bootstrapLog = Box<[(String, String)]>([])
     nonisolated let _bootoutLog = Box<[(String, String)]>([])
+    nonisolated let _kickstartLog = Box<[(String, String)]>([])
+    nonisolated let _nextKickstartExit = Box(Int32(0))
 }
 
 struct StubCodesignVerifier: CodesignVerifying {

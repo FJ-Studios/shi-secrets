@@ -94,6 +94,7 @@ public struct VaultCredentialsSeeder: Sendable {
         clientID: String,
         clientSecret: String,
         serverURL: String,
+        boundSystemName: String? = nil,
         force: Bool,
         verify: Bool
     ) async -> SeedResult {
@@ -127,7 +128,8 @@ public struct VaultCredentialsSeeder: Sendable {
         let credentials = VaultwardenCredentials(
             clientID: clientID,
             clientSecret: clientSecret,
-            serverURL: urlParsed
+            serverURL: urlParsed,
+            boundSystemName: boundSystemName
         )
 
         // Write to Keychain

@@ -36,7 +36,12 @@ public struct SigilEnvelope: Sendable, Codable, Equatable {
         case machineIDEmitting = "machine_id_emitting"
     }
 
-    public init(
+    /// v0.4.3 tech-expert fix: internal — outside callers MUST use
+    /// `SigilEnvelope.signed(at:vaultURL:...)` or the `HankoSigilExchange.emit`
+    /// factory to ensure the 300s envelope-TTL cap is enforced at construction
+    /// time. The `redeem()` re-check remains as defense, but factory-only
+    /// construction is the type-level guarantee.
+    internal init(
         sigilID: String,
         vaultURL: String,
         tokenReference: String,
@@ -50,6 +55,29 @@ public struct SigilEnvelope: Sendable, Codable, Equatable {
         self.expiresAt = expiresAt
         self.hankoJWTProof = hankoJWTProof
         self.machineIDEmitting = machineIDEmitting
+    }
+
+    /// Public factory enforcing the 300s envelope-TTL cap. Use this in
+    /// preference to direct construction; deserialised envelopes still go
+    /// through `redeem()` which re-checks the cap (defense-in-depth).
+    public static func signed(
+        at now: Date,
+        vaultURL: String,
+        tokenReference: String,
+        hankoJWTProof: String,
+        machineIDEmitting: String,
+        sigilID: String = UUID().uuidString,
+        ttlSeconds: Int = HankoSigilExchange.envelopeMaxTTLSeconds
+    ) -> SigilEnvelope {
+        let cappedTTL = min(ttlSeconds, HankoSigilExchange.envelopeMaxTTLSeconds)
+        return SigilEnvelope(
+            sigilID: sigilID,
+            vaultURL: vaultURL,
+            tokenReference: tokenReference,
+            expiresAt: now.addingTimeInterval(TimeInterval(cappedTTL)),
+            hankoJWTProof: hankoJWTProof,
+            machineIDEmitting: machineIDEmitting
+        )
     }
 
     /// Returns true if the envelope is still valid at `now`.

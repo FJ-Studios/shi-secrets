@@ -33,10 +33,24 @@ public struct VaultwardenCredentials: Codable, Sendable, Equatable {
     /// config hierarchy (config.yml → env → DEV default) before use.
     public let serverURL: URL
 
-    public init(clientID: String, clientSecret: String, serverURL: URL) {
+    /// v0.4.3 HIGH-2 fix (@security panel): the system name this credential
+    /// blob was provisioned for. Persisted INSIDE the Keychain blob so the
+    /// sidecar `~/.shikki/etc/secrets/system-name` file cannot be replaced
+    /// out-of-band (cache-poisoning HIGH-2 from v0.4.1 @security review).
+    /// Brokerd boot cross-validates the file against this field via
+    /// `SystemNameBindingVerifier`. `nil` for legacy blobs seeded pre-v0.4.3.
+    public let boundSystemName: String?
+
+    public init(
+        clientID: String,
+        clientSecret: String,
+        serverURL: URL,
+        boundSystemName: String? = nil
+    ) {
         self.clientID = clientID
         self.clientSecret = clientSecret
         self.serverURL = serverURL
+        self.boundSystemName = boundSystemName
     }
 
     // MARK: - Codable keys (snake_case matches Vaultwarden API field names)
@@ -45,5 +59,6 @@ public struct VaultwardenCredentials: Codable, Sendable, Equatable {
         case clientID = "client_id"
         case clientSecret = "client_secret"
         case serverURL = "server_url"
+        case boundSystemName = "bound_system_name"
     }
 }

@@ -160,11 +160,44 @@ struct BrokerMain {
         // ~/.shikki/etc/secrets/system-name is present, enforce blast-radius
         // isolation (W6.5c F-PSA-3). Absent file = no secondary check (legacy
         // installs pre-W6.5c continue to work; allowlist remains the gate).
+        //
+        // v0.4.3 HIGH-2 fix (@security panel): cross-validate the sidecar
+        // file against `VaultwardenCredentials.boundSystemName` loaded from
+        // the Keychain. Mismatch = poisoned sidecar file → refuse boot.
+        //
+        // v0.4.3 tech-expert MED fix: replace `try?` with explicit catch
+        // that logs IO errors so a permissions failure cannot silently
+        // disable blast-radius isolation.
         let systemScopePolicy: ScopePolicy? = {
             let writer = LiveSystemNameWriter()
-            guard let name = try? writer.read() else { return nil }
-            log("shikki-secrets-brokerd: per-system ScopePolicy active for systemName=\(name)")
-            return ScopePolicy(systemName: name)
+            let sidecarName: String?
+            do {
+                sidecarName = try writer.read()
+            } catch {
+                FileHandle.standardError.write(Data(
+                    "shikki-secrets-brokerd: ERROR system-name sidecar read failed: \(error). Blast-radius isolation DISABLED.\n".utf8
+                ))
+                return nil
+            }
+            // Load credential blob to read boundSystemName.
+            let credKeychain = KeychainVaultCredentials()
+            let credBoundName: String? = (try? credKeychain.load())?.boundSystemName
+
+            let verdict = SystemNameBindingVerifier.verify(
+                credentialsBoundName: credBoundName,
+                sidecarName: sidecarName
+            )
+            switch verdict {
+            case .ok(let name):
+                guard let name = name else { return nil }
+                log("shikki-secrets-brokerd: per-system ScopePolicy active for systemName=\(name)")
+                return ScopePolicy(systemName: name)
+            case .mismatch(let reason):
+                FileHandle.standardError.write(Data(
+                    "shikki-secrets-brokerd: ERROR system-name binding verification FAILED: \(reason.operatorMessage)\n".utf8
+                ))
+                exit(78)
+            }
         }()
 
         let bridge = MCPBridge()
