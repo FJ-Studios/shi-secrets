@@ -141,8 +141,11 @@ struct BrokerDaemonScopeIntegrationTests {
 
     @Test("T13 secretSet_alwaysSucceedsRegardlessOfScopeAllowlist — set bypasses scope validation")
     func secretSet_alwaysSucceedsRegardlessOfScopeAllowlist() async throws {
-        // With empty allowlist (deny-all for get), set should still work.
-        let (daemon, _, socket) = try await makeDaemon(scopeAllowlist: [])
+        // Use a restrictive allowlist (deny-all for get of "prod/secret"), proving
+        // set goes through BrokerWireDispatcher directly and bypasses scope validation.
+        // An empty allowlist is no longer a valid config (RequestGateway precondition
+        // enforces non-empty). Using "test/integration" achieves the same test intent.
+        let (daemon, _, socket) = try await makeDaemon(scopeAllowlist: ["test/integration"])
         try await daemon.start()
         defer { Task { await socket.shutdown() } }
 
@@ -169,8 +172,10 @@ struct BrokerDaemonScopeIntegrationTests {
 
     @Test("T14 secretList_alwaysSucceedsRegardlessOfScopeAllowlist — list bypasses scope validation")
     func secretList_alwaysSucceedsRegardlessOfScopeAllowlist() async throws {
-        // With empty allowlist (deny-all for get), list should still work.
-        let (daemon, _, socket) = try await makeDaemon(scopeAllowlist: [])
+        // Use a restrictive allowlist proving list goes through BrokerWireDispatcher
+        // directly and bypasses scope validation. See T13 comment for why empty
+        // allowlist is no longer valid after the RequestGateway precondition.
+        let (daemon, _, socket) = try await makeDaemon(scopeAllowlist: ["test/integration"])
         try await daemon.start()
         defer { Task { await socket.shutdown() } }
 

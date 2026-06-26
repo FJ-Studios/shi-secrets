@@ -311,6 +311,14 @@ public actor BrokerDaemon {
             preMintSessionEpoch = epoch
         case .deny(let reason):
             // Gateway already wrote the deny audit row; map to BrokerResponse.
+            //
+            // Observability note (@kintsugi MED-2): blast-radius denials
+            // (.scopeBlastRadiusDenied) are visible in the audit log with a
+            // dedicated DenyReason case. SeamsWriter is reserved for rotation-
+            // engine anomaly signals (AnomalySignal) — appending a seams row
+            // here would be a category error. A future Wave A5 ops-stream verb
+            // (`shi secrets audit recent --reason scopeBlastRadiusDenied`) is
+            // the correct surface for real-time denial alerting.
             return .deny(reason)
         }
 
@@ -506,15 +514,11 @@ public actor BrokerDaemon {
     /// `AppLog.fatal(...)`; the behavioral contract (surface to the host
     /// supervisor) is preserved — CoreKit dep wiring is deferred to v1.1.
     private static func logAuditFailClosed(error: Swift.Error, context: String) {
-        let message = "shikki-brokerd: audit write failed, failing closed — \(context): \(error)\n"
-        if let data = message.data(using: .utf8) {
-            try? FileHandle.standardError.write(contentsOf: data)
-        }
+        brokerdLogAuditFailClosed(error: error, context: context)
     }
 
     private nonisolated func deriveSecretName(from scope: String) -> String {
-        let trimmed = String(scope.prefix(AuditWriter.maxSecretNameLength))
-        return trimmed.isEmpty ? "unknown" : trimmed
+        brokerdDeriveSecretName(from: scope)
     }
 
     // MARK: - handleHUP

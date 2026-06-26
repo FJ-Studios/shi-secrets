@@ -79,7 +79,7 @@ struct BrokerDaemonTests {
         )
         let verifier = ManifestVerifier(pinnedPublicKey: Curve25519.Signing.PrivateKey().publicKey)
         let manifestStore = ManifestStore(verifier: verifier, seams: seams)
-        let scopeValidator = try ScopeValidator(allowlist: [])
+        let scopeValidator = try ScopeValidator(allowlist: ["**"])
         let bridge = MCPBridge()
         // Configure the socket with a WRONG expected uid so the start()
         // preflight trips on ownerMismatch.
@@ -179,7 +179,7 @@ struct BrokerDaemonTests {
         )
         let verifier = ManifestVerifier(pinnedPublicKey: Curve25519.Signing.PrivateKey().publicKey)
         let manifestStore = ManifestStore(verifier: verifier, seams: seams)
-        let scopeValidator = try ScopeValidator(allowlist: [])
+        let scopeValidator = try ScopeValidator(allowlist: ["**"])
         let bridge = MCPBridge()
         let path = socketPath()
         let config = UnixSocketConfig(
@@ -234,7 +234,7 @@ struct BrokerDaemonTests {
         )
         let verifier = ManifestVerifier(pinnedPublicKey: Curve25519.Signing.PrivateKey().publicKey)
         let manifestStore = ManifestStore(verifier: verifier, seams: seams)
-        let scopeValidator = try ScopeValidator(allowlist: [])
+        let scopeValidator = try ScopeValidator(allowlist: ["**"])
         let bridge = MCPBridge()
         let path = socketPath()
         let config = UnixSocketConfig(
@@ -285,7 +285,7 @@ struct BrokerDaemonTests {
         let manifestKey = Curve25519.Signing.PrivateKey()
         let verifier = ManifestVerifier(pinnedPublicKey: manifestKey.publicKey)
         let manifestStore = ManifestStore(verifier: verifier, seams: seams)
-        let scopeValidator = try ScopeValidator(allowlist: [])
+        let scopeValidator = try ScopeValidator(allowlist: ["**"])
         let bridge = MCPBridge()
         let socket = UnixSocketServer(
             config: UnixSocketConfig(

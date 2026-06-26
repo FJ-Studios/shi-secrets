@@ -50,7 +50,7 @@ struct AdminGateTests {
             pinnedPublicKey: Curve25519.Signing.PrivateKey().publicKey
         )
         let manifestStore = ManifestStore(verifier: verifier, seams: seams)
-        let scopeValidator = try ScopeValidator(allowlist: [])
+        let scopeValidator = try ScopeValidator(allowlist: ["**"])
         let bridge = MCPBridge()
         let socket = UnixSocketServer(
             config: UnixSocketConfig(

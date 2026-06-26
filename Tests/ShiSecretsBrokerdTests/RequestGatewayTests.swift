@@ -205,10 +205,11 @@ struct RequestGatewayTests {
 
     @Test("T-A4-07: brokerDaemon_handleRequest_delegatesScopeChecks_toGateway")
     func brokerDaemon_handleRequest_delegatesScopeChecks_toGateway() async throws {
-        // Structural check: BrokerDaemon must expose a `gateway: RequestGateway` field
-        // and must NOT have a `scopeValidator` field after Wave A4 extraction.
-        //
-        // We verify at compile-time via Mirror reflection:
+        // Runtime structural guard via Mirror (NOT compile-time — Swift has no
+        // mechanism to assert field name absence at compile time without protocols).
+        // Mirror over a Swift actor reflects stored properties in declaration order.
+        // Risk: computed properties wrapping a differently-named backing store
+        // would be missed; acceptable since BrokerDaemon uses no such pattern.
         //   - `gateway` must be present
         //   - `scopeValidator` must NOT be present (moved to RequestGateway)
         let kernel = ShikkiKernel()
