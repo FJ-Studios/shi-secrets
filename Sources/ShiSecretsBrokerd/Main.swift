@@ -156,49 +156,36 @@ struct BrokerMain {
         }
         let scopeValidator = try ScopeValidator(allowlist: brokerdSettings.scopeAllowlist)
 
-        // CRIT-1 fix: load per-system ScopePolicy at startup. If
-        // ~/.shikki/etc/secrets/system-name is present, enforce blast-radius
-        // isolation (W6.5c F-PSA-3). Absent file = no secondary check (legacy
-        // installs pre-W6.5c continue to work; allowlist remains the gate).
+        // v0.5.0 Wave A1 (@sensei v0.4.2 panel finding): delegate to the
+        // BootstrapProvider — Main.swift becomes pure wiring. Tests
+        // injecting a mock BootstrapProvider can return nil (or a fixed
+        // ScopePolicy) without touching the real filesystem.
         //
-        // v0.4.3 HIGH-2 fix (@security panel): cross-validate the sidecar
-        // file against `VaultwardenCredentials.boundSystemName` loaded from
-        // the Keychain. Mismatch = poisoned sidecar file → refuse boot.
-        //
-        // v0.4.3 tech-expert MED fix: replace `try?` with explicit catch
-        // that logs IO errors so a permissions failure cannot silently
-        // disable blast-radius isolation.
-        let systemScopePolicy: ScopePolicy? = {
-            let writer = LiveSystemNameWriter()
-            let sidecarName: String?
-            do {
-                sidecarName = try writer.read()
-            } catch {
-                FileHandle.standardError.write(Data(
-                    "shikki-secrets-brokerd: ERROR system-name sidecar read failed: \(error). Blast-radius isolation DISABLED.\n".utf8
-                ))
-                return nil
+        // Composes the prior v0.4.3 HIGH-2 (cross-validate via
+        // SystemNameBindingVerifier) + tech-expert MED (explicit error
+        // path for IO failures + sidecar/Keychain mismatch).
+        let systemScopePolicy: ScopePolicy?
+        do {
+            systemScopePolicy = try bootstrap.loadSystemScopePolicy()
+            if let policy = systemScopePolicy {
+                log("shikki-secrets-brokerd: per-system ScopePolicy active for systemName=\(policy.systemName)")
             }
-            // Load credential blob to read boundSystemName.
-            let credKeychain = KeychainVaultCredentials()
-            let credBoundName: String? = (try? credKeychain.load())?.boundSystemName
-
-            let verdict = SystemNameBindingVerifier.verify(
-                credentialsBoundName: credBoundName,
-                sidecarName: sidecarName
-            )
-            switch verdict {
-            case .ok(let name):
-                guard let name = name else { return nil }
-                log("shikki-secrets-brokerd: per-system ScopePolicy active for systemName=\(name)")
-                return ScopePolicy(systemName: name)
-            case .mismatch(let reason):
-                FileHandle.standardError.write(Data(
-                    "shikki-secrets-brokerd: ERROR system-name binding verification FAILED: \(reason.operatorMessage)\n".utf8
-                ))
-                exit(78)
-            }
-        }()
+        } catch SystemScopePolicyLoadError.bindingMismatch(let reason) {
+            FileHandle.standardError.write(Data(
+                "shikki-secrets-brokerd: ERROR system-name binding verification FAILED: \(reason)\n".utf8
+            ))
+            exit(78)
+        } catch SystemScopePolicyLoadError.sidecarReadFailed(let reason) {
+            FileHandle.standardError.write(Data(
+                "shikki-secrets-brokerd: ERROR system-name sidecar read failed: \(reason). Blast-radius isolation DISABLED.\n".utf8
+            ))
+            systemScopePolicy = nil
+        } catch {
+            FileHandle.standardError.write(Data(
+                "shikki-secrets-brokerd: ERROR loadSystemScopePolicy unexpected: \(error). Blast-radius isolation DISABLED.\n".utf8
+            ))
+            systemScopePolicy = nil
+        }
 
         let bridge = MCPBridge()
 
