@@ -333,12 +333,16 @@ public actor BrokerDaemon {
         // can be operator-misconfigured; this check is the architectural
         // guarantee that a compromised brokerd cannot read another system's
         // collection even if the allowlist accidentally permits it.
+        //
+        // v0.5.0 / Wave A3: uses dedicated .scopeBlastRadiusDenied so audit
+        // ops can distinguish a toml-config gate (.scopePatternDenied above)
+        // from a real W6.5c F-PSA-3 isolation refusal.
         if let policy = systemScopePolicy, !policy.canRead(path: request.scope) {
             if let resp = await writeDenyOrFailClosed(
                 jti: "unminted", request: request, wrapped: wrapped,
-                now: now, reason: .scopePatternDenied
+                now: now, reason: .scopeBlastRadiusDenied
             ) { return resp }
-            return .deny(.scopePatternDenied)
+            return .deny(.scopeBlastRadiusDenied)
         }
 
         // BWClient session must still be valid — BR-F-07. Review finding #3:
