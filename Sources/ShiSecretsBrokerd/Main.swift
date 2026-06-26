@@ -213,6 +213,15 @@ struct BrokerMain {
             toolManifest: []
         )
 
+        // Wave A4: wire RequestGateway before BrokerDaemon so pre-mint
+        // scope/session checks are owned by the gateway, not the daemon.
+        let gateway = RequestGateway(
+            scopeValidator: scopeValidator,
+            systemScopePolicy: systemScopePolicy,
+            bwClient: bwClient,
+            audit: audit
+        )
+
         let daemon = BrokerDaemon(
             kernel: kernel,
             audit: audit,
@@ -221,7 +230,7 @@ struct BrokerMain {
             drivers: drivers,
             engine: engine,
             manifestStore: manifestStore,
-            scopeValidator: scopeValidator,
+            gateway: gateway,
             systemScopePolicy: systemScopePolicy,
             bridge: bridge,
             socket: socket,

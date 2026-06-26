@@ -71,10 +71,13 @@ struct AdminGateTests {
             pinnedPublicKey: adminPublicKey,
             clock: clock
         )
+        let gateway = RequestGateway(
+            scopeValidator: scopeValidator, bwClient: bwClient, audit: audit
+        )
         let daemon = BrokerDaemon(
             kernel: kernel, audit: audit, seams: seams, registry: registry,
             drivers: drivers, engine: engine,
-            manifestStore: manifestStore, scopeValidator: scopeValidator,
+            manifestStore: manifestStore, gateway: gateway,
             bridge: bridge, socket: socket, bwClient: bwClient, minter: minter,
             bootstrap: StubBootstrapProvider(),
             adminVerifier: adminVerifier
