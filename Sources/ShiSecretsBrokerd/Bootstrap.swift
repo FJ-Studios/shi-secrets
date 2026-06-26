@@ -67,6 +67,38 @@ public protocol BootstrapProvider: Sendable {
     /// Throws if Keychain credentials are missing or Vaultwarden is unreachable.
     /// Returns the authenticated VaultwardenClient + signing-key pair on success.
     func unseal() async throws -> (vaultClient: VaultwardenClient, signingKey: BrokerSigningKey)
+
+    /// v0.5.0 Wave A1 (@sensei v0.4.2 panel finding): provider-owned
+    /// resolution of the per-system blast-radius ScopePolicy. Replaces the
+    /// inline closure that used to live in Main.swift, which bypassed the
+    /// BootstrapProvider abstraction (tests injecting MockBootstrap
+    /// couldn't suppress the real-filesystem read of the system-name
+    /// sidecar — the v0.4.2 sensei finding).
+    ///
+    /// Returns `nil` when:
+    ///   - No sidecar file at `~/.shikki/etc/secrets/system-name` AND
+    ///     no `bound_system_name` in Keychain credentials (legacy install).
+    ///   - The bootstrap provider has no policy notion (test doubles).
+    ///
+    /// MUST refuse boot (caller exits 78) when sidecar and Keychain
+    /// `boundSystemName` diverge — pass-through to SystemNameBindingVerifier.
+    /// Default impl returns `nil` for backward-compat / test doubles.
+    func loadSystemScopePolicy() throws -> ScopePolicy?
+}
+
+public extension BootstrapProvider {
+    /// Default: no policy. Production `Bootstrap` overrides this to wire
+    /// `LiveSystemNameWriter` + `SystemNameBindingVerifier` against the
+    /// Keychain `bound_system_name`. Test doubles can stay default-nil.
+    func loadSystemScopePolicy() throws -> ScopePolicy? { return nil }
+}
+
+/// v0.5.0 Wave A1: explicit error type so Main.swift can distinguish
+/// `nil` (no policy seeded, legacy install) from `mismatch` (cache-poison
+/// attempt, refuse boot with exit 78).
+public enum SystemScopePolicyLoadError: Error, Sendable {
+    case bindingMismatch(reason: String)
+    case sidecarReadFailed(reason: String)
 }
 
 // Bootstrap captures a FileManager reference which Foundation does not
@@ -265,6 +297,37 @@ public struct Bootstrap {
         throw BootstrapError.signingKeyMissing
         #endif
         #endif
+    }
+
+    /// v0.5.0 Wave A1 (@sensei v0.4.2 panel finding): owned by the
+    /// BootstrapProvider so tests can inject overrides without touching
+    /// the real filesystem. Production resolution chain:
+    ///   1. Read sidecar via LiveSystemNameWriter().read()
+    ///   2. Load Keychain credentials' boundSystemName (if present)
+    ///   3. Cross-validate via SystemNameBindingVerifier
+    ///   4. Return ScopePolicy on .ok / throw bindingMismatch on .mismatch
+    /// Returning `nil` is legitimate for legacy installs (pre-v0.4.3 blob
+    /// without boundSystemName + no sidecar yet).
+    public func loadSystemScopePolicy() throws -> ScopePolicy? {
+        let writer = LiveSystemNameWriter()
+        let sidecarName: String?
+        do {
+            sidecarName = try writer.read()
+        } catch {
+            throw SystemScopePolicyLoadError.sidecarReadFailed(reason: "\(error)")
+        }
+        let credBoundName: String? = (try? KeychainVaultCredentials().load())?.boundSystemName
+        let verdict = SystemNameBindingVerifier.verify(
+            credentialsBoundName: credBoundName,
+            sidecarName: sidecarName
+        )
+        switch verdict {
+        case .ok(let name):
+            guard let name = name else { return nil }
+            return ScopePolicy(systemName: name)
+        case .mismatch(let reason):
+            throw SystemScopePolicyLoadError.bindingMismatch(reason: reason.operatorMessage)
+        }
     }
 
     /// v1 rejects the TPM2 hardware-sealed path.
