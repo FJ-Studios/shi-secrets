@@ -20,6 +20,7 @@ struct AuditRowTests {
             .replay,
             .scopeDenied,
             .scopePatternDenied,
+            .scopeBlastRadiusDenied,
             .scopeTooLong,
             .opMismatch,
             .rotationFailed,

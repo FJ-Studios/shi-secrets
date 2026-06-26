@@ -33,6 +33,16 @@ public struct AuditRow: Codable, Sendable, Equatable {
         case scopeDenied          = "scope_denied"
         case scopePatternDenied   = "scope_pattern_denied"
         case scopeTooLong         = "scope_too_long"
+        /// v0.5.0 / Wave A3 (@sensei v0.4.2 panel finding): distinct from
+        /// `scopePatternDenied`. `scopePatternDenied` = toml-allowlist (a
+        /// configuration gate, operator-tunable per ScopeValidator).
+        /// `scopeBlastRadiusDenied` = per-system ScopePolicy refusal (a
+        /// security enforcement of the W6.5c F-PSA-3 invariant; means the
+        /// caller asked for a path outside this system's
+        /// shi/system/<self>/** + shi/shared/** blast radius). Without
+        /// this distinction ops cannot tell config-misroute from a real
+        /// isolation-breach attempt in audit logs.
+        case scopeBlastRadiusDenied = "scope_blast_radius_denied"
         case opMismatch           = "op_mismatch"
         case rotationFailed       = "rotation_failed"
         case manifestSigFailed    = "manifest_sig_failed"
