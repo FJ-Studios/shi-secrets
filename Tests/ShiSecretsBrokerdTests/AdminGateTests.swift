@@ -50,7 +50,7 @@ struct AdminGateTests {
             pinnedPublicKey: Curve25519.Signing.PrivateKey().publicKey
         )
         let manifestStore = ManifestStore(verifier: verifier, seams: seams)
-        let scopeValidator = try ScopeValidator(allowlist: [])
+        let scopeValidator = try ScopeValidator(allowlist: ["**"])
         let bridge = MCPBridge()
         let socket = UnixSocketServer(
             config: UnixSocketConfig(
@@ -71,10 +71,13 @@ struct AdminGateTests {
             pinnedPublicKey: adminPublicKey,
             clock: clock
         )
+        let gateway = RequestGateway(
+            scopeValidator: scopeValidator, bwClient: bwClient, audit: audit
+        )
         let daemon = BrokerDaemon(
             kernel: kernel, audit: audit, seams: seams, registry: registry,
             drivers: drivers, engine: engine,
-            manifestStore: manifestStore, scopeValidator: scopeValidator,
+            manifestStore: manifestStore, gateway: gateway,
             bridge: bridge, socket: socket, bwClient: bwClient, minter: minter,
             bootstrap: StubBootstrapProvider(),
             adminVerifier: adminVerifier

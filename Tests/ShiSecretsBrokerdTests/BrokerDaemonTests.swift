@@ -54,10 +54,13 @@ struct BrokerDaemonTests {
         let minter = TokenMinter(
             registry: registry, signingKey: signingKey, toolManifest: manifest
         )
+        let gateway = RequestGateway(
+            scopeValidator: scopeValidator, bwClient: bwClient, audit: audit
+        )
         let daemon = BrokerDaemon(
             kernel: kernel, audit: audit, seams: seams, registry: registry,
             drivers: drivers, engine: engine,
-            manifestStore: manifestStore, scopeValidator: scopeValidator,
+            manifestStore: manifestStore, gateway: gateway,
             bridge: bridge, socket: socket, bwClient: bwClient, minter: minter,
             bootstrap: StubBootstrapProvider()
         )
@@ -76,7 +79,7 @@ struct BrokerDaemonTests {
         )
         let verifier = ManifestVerifier(pinnedPublicKey: Curve25519.Signing.PrivateKey().publicKey)
         let manifestStore = ManifestStore(verifier: verifier, seams: seams)
-        let scopeValidator = try ScopeValidator(allowlist: [])
+        let scopeValidator = try ScopeValidator(allowlist: ["**"])
         let bridge = MCPBridge()
         // Configure the socket with a WRONG expected uid so the start()
         // preflight trips on ownerMismatch.
@@ -94,10 +97,13 @@ struct BrokerDaemonTests {
             signingKey: Curve25519.Signing.PrivateKey(),
             toolManifest: []
         )
+        let gateway = RequestGateway(
+            scopeValidator: scopeValidator, bwClient: bwClient, audit: audit
+        )
         let daemon = BrokerDaemon(
             kernel: kernel, audit: audit, seams: seams, registry: registry,
             drivers: drivers, engine: engine,
-            manifestStore: manifestStore, scopeValidator: scopeValidator,
+            manifestStore: manifestStore, gateway: gateway,
             bridge: bridge, socket: socket, bwClient: bwClient, minter: minter,
             bootstrap: StubBootstrapProvider()
         )
@@ -173,7 +179,7 @@ struct BrokerDaemonTests {
         )
         let verifier = ManifestVerifier(pinnedPublicKey: Curve25519.Signing.PrivateKey().publicKey)
         let manifestStore = ManifestStore(verifier: verifier, seams: seams)
-        let scopeValidator = try ScopeValidator(allowlist: [])
+        let scopeValidator = try ScopeValidator(allowlist: ["**"])
         let bridge = MCPBridge()
         let path = socketPath()
         let config = UnixSocketConfig(
@@ -190,10 +196,13 @@ struct BrokerDaemonTests {
             signingKey: Curve25519.Signing.PrivateKey(),
             toolManifest: []
         )
+        let gateway = RequestGateway(
+            scopeValidator: scopeValidator, bwClient: bwClient, audit: audit
+        )
         let daemon = BrokerDaemon(
             kernel: kernel, audit: audit, seams: seams, registry: registry,
             drivers: drivers, engine: engine,
-            manifestStore: manifestStore, scopeValidator: scopeValidator,
+            manifestStore: manifestStore, gateway: gateway,
             bridge: bridge, socket: socket, bwClient: bwClient, minter: minter,
             bootstrap: StubBootstrapProvider(behavior: .fail(.keychainCredentialsMissing))
         )
@@ -225,7 +234,7 @@ struct BrokerDaemonTests {
         )
         let verifier = ManifestVerifier(pinnedPublicKey: Curve25519.Signing.PrivateKey().publicKey)
         let manifestStore = ManifestStore(verifier: verifier, seams: seams)
-        let scopeValidator = try ScopeValidator(allowlist: [])
+        let scopeValidator = try ScopeValidator(allowlist: ["**"])
         let bridge = MCPBridge()
         let path = socketPath()
         let config = UnixSocketConfig(
@@ -242,10 +251,13 @@ struct BrokerDaemonTests {
             signingKey: Curve25519.Signing.PrivateKey(),
             toolManifest: []
         )
+        let gateway = RequestGateway(
+            scopeValidator: scopeValidator, bwClient: bwClient, audit: audit
+        )
         let daemon = BrokerDaemon(
             kernel: kernel, audit: audit, seams: seams, registry: registry,
             drivers: drivers, engine: engine,
-            manifestStore: manifestStore, scopeValidator: scopeValidator,
+            manifestStore: manifestStore, gateway: gateway,
             bridge: bridge, socket: socket, bwClient: bwClient, minter: minter,
             bootstrap: StubBootstrapProvider(),
             manifestSource: ManifestSource(bytes: Data("{}".utf8), signature: Data([0xAB]))
@@ -273,7 +285,7 @@ struct BrokerDaemonTests {
         let manifestKey = Curve25519.Signing.PrivateKey()
         let verifier = ManifestVerifier(pinnedPublicKey: manifestKey.publicKey)
         let manifestStore = ManifestStore(verifier: verifier, seams: seams)
-        let scopeValidator = try ScopeValidator(allowlist: [])
+        let scopeValidator = try ScopeValidator(allowlist: ["**"])
         let bridge = MCPBridge()
         let socket = UnixSocketServer(
             config: UnixSocketConfig(
@@ -302,10 +314,13 @@ struct BrokerDaemonTests {
         let bytes = try encoder.encode(manifest)
         let sig = try manifestKey.signature(for: bytes)
 
+        let gateway = RequestGateway(
+            scopeValidator: scopeValidator, bwClient: bwClient, audit: audit
+        )
         let daemon = BrokerDaemon(
             kernel: kernel, audit: audit, seams: seams, registry: registry,
             drivers: drivers, engine: engine,
-            manifestStore: manifestStore, scopeValidator: scopeValidator,
+            manifestStore: manifestStore, gateway: gateway,
             bridge: bridge, socket: socket, bwClient: bwClient, minter: minter,
             bootstrap: StubBootstrapProvider(),
             manifestSource: ManifestSource(bytes: bytes, signature: Data(sig))

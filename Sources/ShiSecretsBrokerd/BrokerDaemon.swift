@@ -97,15 +97,18 @@ public actor BrokerDaemon {
     public let drivers: DriverRegistry
     public let engine: RotationEngine
     public let manifestStore: ManifestStore
-    public let scopeValidator: ScopeValidator
+    /// Wave A4: pre-mint scope/session validation extracted from handleRequest.
+    /// Owns ScopeValidator + ScopePolicy blast-radius check + BWClient session check.
+    public let gateway: RequestGateway
     /// Per-system blast-radius isolation (W6.5c F-PSA-3, CRIT-1 fix
-    /// 2026-06-25). Wires `ScopePolicy.canRead(path:)` into the request
-    /// path so a brokerd install reads ONLY `shi/system/<self>/**` +
-    /// `shi/shared/**`. `nil` disables the secondary check (Wave-4 tests
-    /// + Linux nodes pre-W6.5c). Production wiring required.
+    /// 2026-06-25). Kept as a direct field so BrokerWireDispatch can read it
+    /// for secret.set/list/delete inline checks (Wave A4 constraint — those
+    /// paths are out of scope for RequestGateway extraction).
     public let systemScopePolicy: ScopePolicy?
     public let bridge: MCPBridge
     public let socket: UnixSocketServer
+    /// Kept as a direct field so BrokerWireDispatch can read it for
+    /// secret.set/list/delete inline checks (Wave A4 constraint).
     public let bwClient: any BWClient
     public let minter: TokenMinter
     /// Review finding U13 — BrokerDaemon.start calls bootstrap.unseal as
@@ -144,7 +147,7 @@ public actor BrokerDaemon {
         drivers: DriverRegistry,
         engine: RotationEngine,
         manifestStore: ManifestStore,
-        scopeValidator: ScopeValidator,
+        gateway: RequestGateway,
         systemScopePolicy: ScopePolicy? = nil,
         bridge: MCPBridge,
         socket: UnixSocketServer,
@@ -164,7 +167,7 @@ public actor BrokerDaemon {
         self.drivers = drivers
         self.engine = engine
         self.manifestStore = manifestStore
-        self.scopeValidator = scopeValidator
+        self.gateway = gateway
         self.systemScopePolicy = systemScopePolicy
         self.bridge = bridge
         self.socket = socket
@@ -299,67 +302,24 @@ public actor BrokerDaemon {
         wrapped: WrappedRequest,
         now: Date = Date()
     ) async -> BrokerResponse {
-        // Scope-validate the caller's pattern (BR-H-04, -H-06, finding #8).
-        do {
-            try scopeValidator.validate(pattern: request.scope)
-        } catch ScopeValidator.ValidationError.scopeTooLong {
-            if let resp = await writeDenyOrFailClosed(
-                jti: "unminted", request: request, wrapped: wrapped,
-                now: now, reason: .scopeTooLong
-            ) { return resp }
-            return .deny(.scopeTooLong)
-        } catch ScopeValidator.ValidationError.scopePatternDenied {
-            if let resp = await writeDenyOrFailClosed(
-                jti: "unminted", request: request, wrapped: wrapped,
-                now: now, reason: .scopePatternDenied
-            ) { return resp }
-            return .deny(.scopePatternDenied)
-        } catch ScopeValidator.ValidationError.regexSyntaxForbidden {
-            if let resp = await writeDenyOrFailClosed(
-                jti: "unminted", request: request, wrapped: wrapped,
-                now: now, reason: .scopePatternDenied
-            ) { return resp }
-            return .deny(.scopePatternDenied)
-        } catch {
-            if let resp = await writeDenyOrFailClosed(
-                jti: "unminted", request: request, wrapped: wrapped,
-                now: now, reason: .scopeDenied
-            ) { return resp }
-            return .deny(.scopeDenied)
-        }
-
-        // W6.5c CRIT-1 fix: secondary blast-radius enforcement via
-        // per-system ScopePolicy. The toml allowlist (ScopeValidator above)
-        // can be operator-misconfigured; this check is the architectural
-        // guarantee that a compromised brokerd cannot read another system's
-        // collection even if the allowlist accidentally permits it.
-        //
-        // v0.5.0 / Wave A3: uses dedicated .scopeBlastRadiusDenied so audit
-        // ops can distinguish a toml-config gate (.scopePatternDenied above)
-        // from a real W6.5c F-PSA-3 isolation refusal.
-        if let policy = systemScopePolicy, !policy.canRead(path: request.scope) {
-            if let resp = await writeDenyOrFailClosed(
-                jti: "unminted", request: request, wrapped: wrapped,
-                now: now, reason: .scopeBlastRadiusDenied
-            ) { return resp }
-            return .deny(.scopeBlastRadiusDenied)
-        }
-
-        // BWClient session must still be valid — BR-F-07. Review finding #3:
-        // the bw-session-invalid path was previously overloaded onto
-        // `.incidentBypass`; surface it as its own dedicated reason so
-        // audit/TUI can distinguish operator-initiated bw revoke from a
-        // generic incident bypass.
-        // Review finding U5 — capture the bw-session epoch now and
-        // re-check after mint so a concurrent invalidateSession cannot
-        // slip through while we're signing.
-        let preMintSessionEpoch = await bwClient.sessionEpoch
-        guard await bwClient.isSessionValid else {
-            if let resp = await writeDenyOrFailClosed(
-                jti: "unminted", request: request, wrapped: wrapped,
-                now: now, reason: .brokerSessionInvalid
-            ) { return resp }
-            return .deny(.brokerSessionInvalid)
+        // Wave A4: delegate all pre-mint scope/session checks to RequestGateway.
+        // The gateway writes audit deny rows and returns .deny(reason) or
+        // .allow(preMintSessionEpoch) for the post-mint U5 race-closure check.
+        let preMintSessionEpoch: UInt64
+        switch await gateway.authorise(request, wrapped: wrapped, now: now) {
+        case .allow(let epoch):
+            preMintSessionEpoch = epoch
+        case .deny(let reason):
+            // Gateway already wrote the deny audit row; map to BrokerResponse.
+            //
+            // Observability note (@kintsugi MED-2): blast-radius denials
+            // (.scopeBlastRadiusDenied) are visible in the audit log with a
+            // dedicated DenyReason case. SeamsWriter is reserved for rotation-
+            // engine anomaly signals (AnomalySignal) — appending a seams row
+            // here would be a category error. A future Wave A5 ops-stream verb
+            // (`shi secrets audit recent --reason scopeBlastRadiusDenied`) is
+            // the correct surface for real-time denial alerting.
+            return .deny(reason)
         }
 
         // Mint — op-gate vs signed manifest happens inside TokenMinter.
@@ -554,15 +514,11 @@ public actor BrokerDaemon {
     /// `AppLog.fatal(...)`; the behavioral contract (surface to the host
     /// supervisor) is preserved — CoreKit dep wiring is deferred to v1.1.
     private static func logAuditFailClosed(error: Swift.Error, context: String) {
-        let message = "shikki-brokerd: audit write failed, failing closed — \(context): \(error)\n"
-        if let data = message.data(using: .utf8) {
-            try? FileHandle.standardError.write(contentsOf: data)
-        }
+        brokerdLogAuditFailClosed(error: error, context: context)
     }
 
     private nonisolated func deriveSecretName(from scope: String) -> String {
-        let trimmed = String(scope.prefix(AuditWriter.maxSecretNameLength))
-        return trimmed.isEmpty ? "unknown" : trimmed
+        brokerdDeriveSecretName(from: scope)
     }
 
     // MARK: - handleHUP
