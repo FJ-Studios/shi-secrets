@@ -100,8 +100,16 @@ struct BrokerMain {
             await prod.wire(client: prodVault)
             bwClient = prod
             prodVaultClient = prodVault
-            resolvedSocketPath = (ProcessInfo.processInfo.environment["SHIKKI_BROKER_SOCKET"]
-                ?? (NSHomeDirectory() + "/.shikki/run/secrets-brokerd.sock"))
+            // Resolution order (production):
+            //   1. --socket <path> CLI arg (passed by LaunchAgent plist — honors XDG install path)
+            //   2. SHIKKI_BROKER_SOCKET env var (operator override)
+            //   3. legacy default ~/.shikki/run/secrets-brokerd.sock (pre-XDG fallback)
+            // The plist always passes --socket with the ShikkiPaths.dataRoot()-derived path,
+            // so production daemons installed via `shi secrets brokerd install` land on the
+            // correct XDG socket path without needing an env var override.
+            resolvedSocketPath = devArgs.socketPath
+                ?? ProcessInfo.processInfo.environment["SHIKKI_BROKER_SOCKET"]
+                ?? (NSHomeDirectory() + "/.shikki/run/secrets-brokerd.sock")
         }
         _ = prodVaultClient  // suppress unused warning when dev-mode
 
@@ -189,8 +197,9 @@ struct BrokerMain {
 
         let bridge = MCPBridge()
 
-        // Socket: dev-mode resolved its own socketPath; production reads
-        // from env/default. (bwClient was assigned in dev or prod branch above.)
+        // Socket: dev-mode resolved its own socketPath; production resolves
+        // from --socket arg / SHIKKI_BROKER_SOCKET env / legacy default.
+        // (bwClient was assigned in dev or prod branch above.)
         let socketPath = resolvedSocketPath
         // HIGH-6: suppress SIGPIPE — writes to closed sockets return EPIPE instead of killing the process.
         signal(SIGPIPE, SIG_IGN)
