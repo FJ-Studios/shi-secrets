@@ -193,6 +193,45 @@ struct MachineAccountSeederRefusalTests {
     }
 }
 
+@Suite("W6.5c MachineAccountSeeder — canonicalisation")
+struct MachineAccountSeederCanonicalisationTests {
+
+    @Test("canonicalises system name on write (uppercase input → lowercase account key)")
+    func seeder_canonicalises_system_name_on_write() async throws {
+        // SystemNamePolicy.validate lowercases the candidate before storing.
+        // This test verifies the full stack: uppercase input passes through
+        // MachineAccountSeeder → SystemNamePolicy → writer and credential,
+        // all using the lowercased form.
+        let store = MAMockVaultCredentialStore()
+        let writer = InMemorySystemNameWriter()
+        let seeder = MachineAccountSeeder(store: store, systemNameWriter: writer)
+
+        let outcome = await seeder.seed(
+            candidateSystemName: "Mac-Laptop-Shikki",  // uppercase input
+            clientID: "user.00000000-0000-0000-0000-000000000001",
+            clientSecret: "canonical-test-token",
+            serverURL: "https://vw.obyw.one",
+            force: false
+        )
+
+        // Outcome should carry the canonicalised (lowercased) name.
+        switch outcome {
+        case .seeded(let name, _):
+            #expect(name == "mac-laptop-shikki", "outcome systemName must be lowercased")
+        default:
+            Issue.record("expected .seeded, got \(outcome)")
+        }
+
+        // The system-name sidecar (account key) must also be lowercase.
+        let persisted = try? writer.read()
+        #expect(persisted == "mac-laptop-shikki", "systemNameWriter must store the lowercased name")
+
+        // The stored credential's boundSystemName must also be lowercase.
+        let creds = await store.peek()
+        #expect(creds?.boundSystemName == "mac-laptop-shikki", "boundSystemName in credential must be lowercased")
+    }
+}
+
 @Suite("W6.5c MachineAccountSeeder — API surface contract (T-W6.5c-05)")
 struct MachineAccountSeederAPISurfaceTests {
 
