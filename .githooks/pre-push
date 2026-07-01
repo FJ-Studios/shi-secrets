@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+#
+# pre-push — protect main/release/tags from accidental destruction
+#
+# Refuses:
+#   - Deletion of: main, release/*, hotfix/*, v*.*.* tags
+#   - Force-push (any form) to: main
+#
+# Allows:
+#   - Normal fast-forward pushes to any branch
+#   - Force-push to non-protected branches (the work-branch flow)
+#   - Tag creation (only deletion/replace of v* tags is blocked)
+#
+# Override (use rarely + with intent):
+#   ALLOW_PROTECTED_DESTRUCTION=1 git push ...
+#
+# Source-of-truth: .githooks/protected-refs.toml
+#
+# Install: git config core.hooksPath .githooks && chmod +x .githooks/pre-push
+#
+set -euo pipefail
+
+if [[ "${ALLOW_PROTECTED_DESTRUCTION:-0}" == "1" ]]; then
+  echo "pre-push: ALLOW_PROTECTED_DESTRUCTION=1 → guard bypassed." >&2
+  exit 0
+fi
+
+ZERO_SHA="0000000000000000000000000000000000000000"
+
+protected_branch() {
+  case "$1" in
+    refs/heads/main) return 0 ;;
+    refs/heads/release/*|refs/heads/hotfix/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+protected_tag() {
+  case "$1" in
+    refs/tags/v[0-9]*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+force_no_lease=0
+for arg in "$@"; do
+  case "$arg" in
+    --force|-f) force_no_lease=1 ;;
+  esac
+done
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  # Deletion: local_sha = ZERO
+  if [[ "$local_sha" == "$ZERO_SHA" ]]; then
+    if protected_branch "$remote_ref" || protected_tag "$remote_ref"; then
+      echo "pre-push: REFUSED — deletion of protected ref '$remote_ref'." >&2
+      echo "  override: ALLOW_PROTECTED_DESTRUCTION=1 git push ..." >&2
+      exit 1
+    fi
+    continue
+  fi
+
+  # Force-push to protected branch (bare --force, no lease)
+  if [[ $force_no_lease -eq 1 ]] && protected_branch "$remote_ref"; then
+    echo "pre-push: REFUSED — bare --force to protected ref '$remote_ref'." >&2
+    echo "  use --force-with-lease if you really mean it, or set ALLOW_PROTECTED_DESTRUCTION=1." >&2
+    exit 1
+  fi
+
+  # Non-fast-forward push (rewrite) to protected branch — even with --force-with-lease
+  # detected by: remote_sha is non-zero AND not an ancestor of local_sha
+  if protected_branch "$remote_ref" && [[ "$remote_sha" != "$ZERO_SHA" ]]; then
+    if ! git merge-base --is-ancestor "$remote_sha" "$local_sha" 2>/dev/null; then
+      echo "pre-push: REFUSED — non-fast-forward to protected branch '$remote_ref'." >&2
+      echo "  local would rewrite history that remote has." >&2
+      echo "  if intentional: ALLOW_PROTECTED_DESTRUCTION=1 git push ..." >&2
+      exit 1
+    fi
+  fi
+
+  # Protected tag replacement (re-tagging at a different commit)
+  if protected_tag "$remote_ref" && [[ "$remote_sha" != "$ZERO_SHA" ]] && [[ "$remote_sha" != "$local_sha" ]]; then
+    echo "pre-push: REFUSED — protected tag '$remote_ref' would be replaced ($remote_sha → $local_sha)." >&2
+    echo "  if intentional (eg moving v0.x.y after a fix): ALLOW_PROTECTED_DESTRUCTION=1 git push ..." >&2
+    exit 1
+  fi
+done
+
+exit 0
