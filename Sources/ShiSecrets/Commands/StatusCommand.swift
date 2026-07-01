@@ -143,7 +143,7 @@ public struct LiveBrokerdProbe: BrokerdProbing {
     public init() {}
 
     public func pids() -> [Int] {
-        let task = Process()
+        let task = Process() // shi-doctor: process-bypass exempt — pgrep probe for running brokerd PIDs; no pure-Swift pid-by-name API
         task.executableURL = URL(fileURLWithPath: "/usr/bin/pgrep")
         task.arguments = ["-f", "shikki-secrets-brokerd"]
         let out = Pipe()

@@ -135,6 +135,7 @@ public struct SecretsBrokerdCommand {
     /// waitUntilExit() (which can block indefinitely).
     @discardableResult
     private func shell(_ args: String..., timeoutSeconds: TimeInterval = 30) -> Int32 {
+        // shi-doctor: process-bypass exempt — launchctl/env spawner with manual deadline-poll watchdog; no TimedShell equivalent for these system binaries
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/usr/bin/env")
         proc.arguments = Array(args)

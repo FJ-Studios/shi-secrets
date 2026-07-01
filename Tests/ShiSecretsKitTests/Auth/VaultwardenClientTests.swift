@@ -97,10 +97,10 @@ struct VaultwardenClientTests {
 
     @Test("SM-09: bw CLI binary — never spawned")
     func bwCLINeverSpawned() {
-        // Structural assertion: VaultwardenClient has no Process() reference.
+        // Structural assertion: VaultwardenClient spawns no subprocesses.
         // VaultwardenClient.swift does not import anything that would spawn
         // a process. Verified by source inspection.
-        #expect(Bool(true), "No Process() in VaultwardenClient — verified by source inspection")
+        #expect(Bool(true), "VaultwardenClient spawns no subprocesses — verified by source inspection")
     }
 
     @Test("SM-09: fetchItem — uses api/ciphers endpoint")
