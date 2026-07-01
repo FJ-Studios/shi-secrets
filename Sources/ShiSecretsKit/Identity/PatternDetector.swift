@@ -70,19 +70,35 @@ public struct LiveVaultCapabilityProbe: VaultCapabilityProbe {
     }
 
     public func secretsManagerAvailable() async -> Bool {
-        // The Secrets Manager API lives under `/api/organizations/.../secrets`.
-        // Stock Vaultwarden does not route the Secrets Manager surface and returns
-        // 404; a Secrets-Manager-capable server returns 401 (auth required) — i.e.
-        // the route EXISTS. We treat "route exists (not 404)" as available.
+        // The Secrets Manager API lives under `/api/organizations`.
+        // Probing anonymously (no auth token) distinguishes the two cases:
+        //
+        //   401 — route IS registered; the server knows this endpoint and
+        //          requires authentication. This is the definitive signal that
+        //          Bitwarden Secrets Manager is present (→ Pattern A).
+        //
+        //   404 — route is NOT registered at all; stock Vaultwarden without
+        //          the Secrets Manager feature flag returns 404 for every unknown
+        //          path. This means Secrets Manager is absent (→ Pattern B).
+        //
+        //   Any other status (200, 5xx, 3xx…) is ambiguous for an anonymous
+        //   probe; we fail closed to Pattern B (stock Vaultwarden is the safe,
+        //   broadly-compatible default).
         var request = URLRequest(url: serverURL.appendingPathComponent("api/organizations"))
         request.httpMethod = "GET"
         request.timeoutInterval = timeout
         do {
             let (_, response) = try await session.data(for: request)
             guard let http = response as? HTTPURLResponse else { return false }
-            // 404 → route absent → stock Vaultwarden → Pattern B.
-            return http.statusCode != 404
+            // 401 → route present + auth wall → Secrets Manager live → Pattern A.
+            return http.statusCode == 401
         } catch {
+            // Network / TLS / timeout error — fail closed to Pattern B.
+            ShikkiSecretsLogger().warning(
+                """
+                {"event":"vault-capability-probe-fallback","server_url":"\(serverURL.absoluteString)","error":"\(String(describing: error).replacingOccurrences(of: "\"", with: "'"))","fallback_pattern":"B"}
+                """
+            )
             return false
         }
     }
