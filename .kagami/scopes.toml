@@ -98,3 +98,39 @@ test_command = ["swift", "test", "--filter", "ShiSecretsKitTests"]
 test_file_patterns = []
 test_target_name = "ShiSecretsKitTests"
 type_patterns = []
+
+[[scopes]]
+name = "e2e-brokerd-no-vault"
+description = "End-to-end ship-gate scenarios for shi-secrets brokerd without live vault (uses stubs)"
+language = "swift"
+package_path = "."
+type_patterns = [
+  "SocketBindRoundtrip",
+  "PlistParseSchema",
+  "AcceptLoopInterrupt",
+  "SigningKeyLoad",
+  "Vault429RetryWithStub",
+]
+test_file_patterns = [
+  "Tests/E2EBeta/SocketBindRoundtripTests.swift",
+  "Tests/E2EBeta/PlistParseSchemaTests.swift",
+  "Tests/E2EBeta/AcceptLoopInterruptTests.swift",
+  "Tests/E2EBeta/SigningKeyLoadTests.swift",
+  "Tests/E2EBeta/Vault429RetryWithStubTests.swift",
+]
+tags = ["e2e", "beta-cluster", "shi-secrets-hanko-beta"]
+
+[[scopes]]
+name = "e2e-brokerd-vault-live"
+description = "End-to-end ship-gate scenarios for shi-secrets brokerd with live vault (operator-machine only — NOT for CI)"
+language = "swift"
+package_path = "."
+type_patterns = [
+  "OAuthClientCredentialsRoundtrip",
+  "SecretsSetGetListDelete",
+]
+test_file_patterns = [
+  "Tests/E2EBeta/OAuthClientCredentialsRoundtripTests.swift",
+  "Tests/E2EBeta/SecretsSetGetListDeleteTests.swift",
+]
+tags = ["e2e", "beta-cluster", "shi-secrets-hanko-beta", "vault-live", "operator-only"]
