@@ -56,7 +56,7 @@ public protocol CodesignVerifying: Sendable {
 public struct LiveCodesignVerifier: CodesignVerifying {
     public init() {}
     public func teamIdentifier(forBinaryAt path: String) -> String? {
-        let task = Process()
+        let task = Process() // shi-doctor: process-bypass exempt — codesign binary probe with 5s watchdog; no pure-Swift code-signing API
         task.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
         task.arguments = ["-dv", path]
         let err = Pipe()

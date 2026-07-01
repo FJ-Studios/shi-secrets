@@ -93,7 +93,7 @@ public enum SessionFingerprint {
         }
         // Subprocess justification: loginctl is a non-Swift external. No
         // pure-Swift D-Bus client is available in the standard toolchain.
-        let task = Process()
+        let task = Process() // shi-doctor: process-bypass exempt — loginctl invocation; no pure-Swift D-Bus client available in standard toolchain
         task.executableURL = URL(fileURLWithPath: "/usr/bin/loginctl")
         task.arguments = ["show-session", sessionID, "-p", "Timestamp"]
         let pipe = Pipe()

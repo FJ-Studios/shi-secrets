@@ -96,9 +96,9 @@ struct SessionCacheTests {
 
     @Test("SM-12: Token — never passed as subprocess argument")
     func tokenNeverPassedAsSubprocessArg() {
-        // SessionCache and VaultwardenClient have no Process() references.
+        // SessionCache and VaultwardenClient spawn no subprocesses.
         // The token is passed via URLRequest headers only (Authorization: Bearer).
-        #expect(Bool(true), "No Process() in SessionCache or VaultwardenClient — verified by source")
+        #expect(Bool(true), "No subprocess spawning in SessionCache or VaultwardenClient — verified by source")
     }
 
     @Test("SM-12: Token — never appears in logs")
