@@ -1,0 +1,35 @@
+# Protected refs — source of truth for cleanup tools and pre-push hook.
+#
+# Any branch/tag matching one of these patterns is REFUSED for:
+#   - git push --delete origin <ref>
+#   - git push --force origin <ref>  (bare force, no lease)
+#   - non-fast-forward push (history rewrite)
+#   - tag retargeting (moving v* to a different commit)
+#
+# Local-side: every cleanup loop in shi mop / agent scripts MUST consult this file
+# (or the inlined skip list it mirrors) before any `git branch -D` or
+# `git worktree remove`.
+#
+# Override path: ALLOW_PROTECTED_DESTRUCTION=1 git push ... (used rarely)
+#
+# Updated: 2026-06-04 — pattern introduced in shikki-repo after develop got nuked
+# in a cleanup loop (operator-fire). See
+# memory/feedback_protected_branches_in_cleanup_loops.md in shikki-repo for the incident.
+#
+# Adapted for shi-secrets: single-trunk repo (main only; no develop — plugin
+# extraction gap fixed 2026-07-01).
+
+[branches]
+exact = ["main"]
+patterns = [
+  "release/*",
+  "hotfix/*",
+]
+
+[tags]
+patterns = [
+  "v[0-9]*",         # any v-prefixed semver
+]
+
+[overrides]
+env_var = "ALLOW_PROTECTED_DESTRUCTION"
