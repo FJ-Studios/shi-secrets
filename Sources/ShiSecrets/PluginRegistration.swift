@@ -34,7 +34,7 @@ public struct ShiSecretsPlugin: PluginCLISurface {
     /// Dispatch entry-point called by shikki-cli for `shi secrets <subVerb> [args...]`.
     public static func execute(subVerb: String, args: [String]) async throws -> Int32 {
         let socketPath = ProcessInfo.processInfo.environment["SHIKKI_BROKER_SOCKET"]
-            ?? "\(NSHomeDirectory())/.shikki/run/secrets-brokerd.sock"
+            ?? "\(NSHomeDirectory())/.local/share/shikki/run/secrets-brokerd.sock"
 
         switch subVerb {
         case "list":
