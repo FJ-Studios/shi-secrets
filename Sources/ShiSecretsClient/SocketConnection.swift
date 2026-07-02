@@ -24,7 +24,7 @@ public struct SocketConnection: Sendable {
     /// daemon-managed path is `/run/shikki-secrets.sock` per BR-D-02.
     public static let defaultSocketPath: String = {
         ProcessInfo.processInfo.environment["SHIKKI_BROKER_SOCKET"]
-            ?? NSHomeDirectory() + "/.shikki/run/secrets-brokerd.sock" // resolver-exempt: ShiSecretsClient library cannot import ShiKit (lower-layer dep)
+            ?? NSHomeDirectory() + "/.local/share/shikki/run/secrets-brokerd.sock" // resolver-exempt: ShiSecretsClient library cannot import ShiKit (lower-layer dep)
     }()
 
     public let socketPath: String

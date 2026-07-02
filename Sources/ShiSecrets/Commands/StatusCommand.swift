@@ -156,7 +156,7 @@ public struct LiveBrokerdProbe: BrokerdProbing {
     }
 
     public func socketBound() -> Bool {
-        let path = NSString(string: "~/.shikki/run/secrets-brokerd.sock").expandingTildeInPath
+        let path = NSString(string: "~/.local/share/shikki/run/secrets-brokerd.sock").expandingTildeInPath
         // Use higher-level FileManager + attribute introspection — avoids the
         // Darwin.stat type-vs-function name clash entirely.
         let attrs = try? FileManager.default.attributesOfItem(atPath: path)
