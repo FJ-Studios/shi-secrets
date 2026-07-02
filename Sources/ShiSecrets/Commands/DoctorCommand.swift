@@ -18,6 +18,7 @@
 //   D-10 SPM version pin guard, T-W9-11 real-launchctl e2e.
 
 import Foundation
+import ShiSecretsKit
 
 // MARK: - Check protocol
 
@@ -170,6 +171,63 @@ public struct DoctorCheckOrphanedSocket: DoctorCheck {
     }
 }
 
+// MARK: - D-11 signing key present
+
+// Backlog 8cc9c1f0 — surface the missing signing key BEFORE the daemon
+// crash-loops on Bootstrap.signingKeyMissing. When operators only ever run
+// `shi secrets brokerd start` (skipping the wizard), this check catches
+// the fresh-install gap and its `--fix` provisions the 32-byte seed at 0o600.
+public struct DoctorCheckSigningKey: DoctorCheck {
+
+    public let code = "D-11"
+    public let description = "Broker signing key present at ~/.shikki/credentials/broker-signing-key"
+
+    private let credentialsDir: URL
+
+    public init(
+        credentialsDir: URL = URL(fileURLWithPath:
+            NSString(string: "~/.shikki/credentials").expandingTildeInPath)
+    ) {
+        self.credentialsDir = credentialsDir
+    }
+
+    public func detect() -> BrokerdDoctorFinding {
+        let keyURL = credentialsDir.appendingPathComponent("broker-signing-key")
+        guard FileManager.default.fileExists(atPath: keyURL.path) else {
+            return .issue(detail: "broker-signing-key missing at \(keyURL.path) — daemon will crash-loop on signingKeyMissing. Run `shi secrets doctor --fix` to provision a 32-byte seed at 0o600.")
+        }
+        // File exists — sanity check size + perms.
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: keyURL.path) {
+            let size = (attrs[.size] as? NSNumber)?.intValue ?? 0
+            let mode = (attrs[.posixPermissions] as? NSNumber)?.uint16Value ?? 0
+            if size < 32 {
+                return .issue(detail: "broker-signing-key is only \(size) bytes (need 32). Re-provision via `shi secrets doctor --fix`.")
+            }
+            if mode != 0o600 {
+                return .issue(detail: "broker-signing-key has permissions \(String(mode, radix: 8)); must be 0600. Run `shi secrets doctor --fix` to correct.")
+            }
+        }
+        return .clean
+    }
+
+    public func fix(dryRun: Bool) -> DoctorFixResult {
+        if dryRun {
+            return .fixed(action: "Would provision \(credentialsDir.appendingPathComponent("broker-signing-key").path) via BrokerSigningKeyProvisioner.provisionIfNeeded")
+        }
+        do {
+            let outcome = try BrokerSigningKeyProvisioner.provisionIfNeeded(credentialsDir: credentialsDir)
+            switch outcome {
+            case .provisioned:
+                return .fixed(action: "Generated 32-byte signing key at 0o600")
+            case .alreadyPresent:
+                return .fixed(action: "Signing key was present; permissions re-enforced to 0o600")
+            }
+        } catch {
+            return .failed(error: "\(error)")
+        }
+    }
+}
+
 // MARK: - DoctorCommand orchestrator
 
 public struct DoctorCommand {
@@ -190,6 +248,7 @@ public struct DoctorCommand {
             DoctorCheckMultiPid(),
             DoctorCheckAdhocSigned(),
             DoctorCheckOrphanedSocket(),
+            DoctorCheckSigningKey(),
         ]
     }
 

@@ -276,6 +276,19 @@ public struct Bootstrap {
         // macOS production migration to Keychain is W4.
         if let dir = env["CREDENTIALS_DIRECTORY"], !dir.isEmpty {
             let keyPath = dir + "/" + Self.brokerSigningKeyCredName
+
+            // P0 backlog 8cc9c1f0 — first-run auto-provision. When the plist
+            // sets CREDENTIALS_DIRECTORY but the key file is absent (e.g. the
+            // operator ran `shi secrets brokerd start` without going through
+            // the wizard), self-heal by generating a 32-byte seed at 0o600
+            // instead of throwing signingKeyMissing and crash-looping.
+            if !fs.fileExists(atPath: keyPath) {
+                _ = try? BrokerSigningKeyProvisioner.provisionIfNeeded(
+                    credentialsDir: URL(fileURLWithPath: dir),
+                    keyName: Self.brokerSigningKeyCredName
+                )
+            }
+
             if fs.fileExists(atPath: keyPath),
                let keyData = try? Data(contentsOf: URL(fileURLWithPath: keyPath)),
                !keyData.isEmpty {
