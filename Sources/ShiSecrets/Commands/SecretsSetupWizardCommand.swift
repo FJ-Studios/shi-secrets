@@ -224,6 +224,19 @@ public struct SecretsSetupWizardCommand {
 
     /// Bootout legacy + canonical labels, kill leftover procs, bootstrap canonical.
     func rebootBroker() -> Result<Void, WizardError> {
+        // P0 backlog 8cc9c1f0 — provision the broker signing key BEFORE launchd
+        // starts the daemon. Without this, Bootstrap.loadSigningKey() throws
+        // signingKeyMissing and the daemon crash-loops silently. Idempotent —
+        // if the key already exists the bytes are kept; only the 0o600 perm is
+        // (re-)enforced. Fresh installs get a new 32-byte Ed25519 seed here.
+        let credentialsDir = URL(fileURLWithPath: NSString(string: "~/.shikki/credentials")
+            .expandingTildeInPath)
+        do {
+            _ = try BrokerSigningKeyProvisioner.provisionIfNeeded(credentialsDir: credentialsDir)
+        } catch {
+            return .failure(.signingKeyProvisionFailed(reason: "\(error)"))
+        }
+
         // Foundation has no `realUserID`; use Darwin's getuid(2).
         let uid = String(getuid())
         // Bootout both labels — ignore exit codes (no-such-process is fine).
@@ -300,6 +313,7 @@ public enum WizardError: Error, Sendable, Equatable {
     case seederFailed(message: String)
     case launchctlBootstrap(exitCode: Int32, stderr: String)
     case processSpawnFailed(executable: String, reason: String)
+    case signingKeyProvisionFailed(reason: String)
     case socketNeverAppeared(timeoutSeconds: Int, path: String)
     case smokeSetFailed(message: String)
     case smokeGetFailed(message: String)
@@ -309,7 +323,7 @@ public enum WizardError: Error, Sendable, Equatable {
         switch self {
         case .missingInput, .invalidClientID, .invalidServerURL: return 1
         case .keychainOSError, .seederFailed: return 2
-        case .launchctlBootstrap, .processSpawnFailed: return 3
+        case .launchctlBootstrap, .processSpawnFailed, .signingKeyProvisionFailed: return 3
         case .socketNeverAppeared: return 4
         case .smokeSetFailed, .smokeGetFailed, .smokeMismatch: return 5
         }
@@ -324,6 +338,7 @@ public enum WizardError: Error, Sendable, Equatable {
         case .seederFailed(let m): return "seeder failed: \(m)"
         case .launchctlBootstrap(let code, let err): return "launchctl bootstrap exit=\(code) stderr=\(err)"
         case .processSpawnFailed(let exe, let reason): return "process spawn failed (\(exe)): \(reason)"
+        case .signingKeyProvisionFailed(let reason): return "signing key provision failed: \(reason)"
         case .socketNeverAppeared(let s, let p): return "socket never appeared after \(s)s: \(p)"
         case .smokeSetFailed(let m): return "smoke set failed: \(m)"
         case .smokeGetFailed(let m): return "smoke get failed: \(m)"
@@ -339,6 +354,7 @@ public enum WizardError: Error, Sendable, Equatable {
         case .keychainOSError(let st) where st == -25300: return "errSecItemNotFound — re-run with --force"
         case .keychainOSError: return "check Keychain Access.app for the io.shikki.vault entry"
         case .launchctlBootstrap: return "check ~/.shikki/logs/secrets-brokerd.stderr.log"
+        case .signingKeyProvisionFailed: return "check ~/.shikki/credentials/ is writable + parent dirs exist (chmod 700 ~/.shikki/credentials/)"
         case .socketNeverAppeared: return "click 'Toujours autoriser' on any pending Keychain popup, then re-run"
         case .smokeMismatch: return "brokerd returned wrong value — check ScopeValidator allowlist + boundPlaintext path"
         default: return nil
